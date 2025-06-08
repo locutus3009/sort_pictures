@@ -67,7 +67,7 @@ fn main() -> std::io::Result<()> {
             || path.file_name().unwrap().to_string_lossy().starts_with(".")
             || path
                 .extension()
-                .map_or(false, |ext| ext == "sh" || ext == "rs")
+                .is_some_and(|ext| ext == "sh" || ext == "rs")
         {
             continue;
         }
@@ -294,10 +294,8 @@ fn parse_exif_date(value: &Value) -> Option<String> {
                         month.parse::<u32>(),
                         day.parse::<u32>(),
                     ) {
-                        if y >= 1990 && y <= 2099 && m >= 1 && m <= 12 && d >= 1 && d <= 31 {
-                            if NaiveDate::from_ymd_opt(y, m, d).is_some() {
-                                return Some(format!("{}-{}-{}", year, month, day));
-                            }
+                        if (1990..=2099).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) && NaiveDate::from_ymd_opt(y, m, d).is_some() {
+                            return Some(format!("{}-{}-{}", year, month, day));
                         }
                     }
                 }
@@ -323,7 +321,7 @@ fn is_valid_date(date_str: &str) -> bool {
     let month = parts[1].parse::<u32>().unwrap_or(0);
     let day = parts[2].parse::<u32>().unwrap_or(0);
 
-    if year < 1990 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1990..=2099).contains(&year) || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return false;
     }
 
@@ -345,20 +343,15 @@ fn try_parse_yyyymmdd(date_str: &str) -> Option<String> {
     let month_num = month.parse::<u32>().ok()?;
     let day_num = day.parse::<u32>().ok()?;
 
-    if year_num < 1990
-        || year_num > 2099
-        || month_num < 1
-        || month_num > 12
-        || day_num < 1
-        || day_num > 31
+    if !(1990..=2099).contains(&year_num)
+        || !(1..=12).contains(&month_num)
+        || !(1..=31).contains(&day_num)
     {
         return None;
     }
 
     // Проверяем, что дата действительно валидна
-    if NaiveDate::from_ymd_opt(year_num, month_num, day_num).is_none() {
-        return None;
-    }
+    NaiveDate::from_ymd_opt(year_num, month_num, day_num)?;
 
     Some(format!("{}-{}-{}", year, month, day))
 }
@@ -376,20 +369,15 @@ fn try_parse_yyyy_mmdd(year: &str, mmdd: &str) -> Option<String> {
     let month_num = month.parse::<u32>().ok()?;
     let day_num = day.parse::<u32>().ok()?;
 
-    if year_num < 1990
-        || year_num > 2099
-        || month_num < 1
-        || month_num > 12
-        || day_num < 1
-        || day_num > 31
+    if !(1990..=2099).contains(&year_num)
+        || !(1..=12).contains(&month_num)
+        || !(1..=31).contains(&day_num)
     {
         return None;
     }
 
     // Проверяем, что дата действительно валидна
-    if NaiveDate::from_ymd_opt(year_num, month_num, day_num).is_none() {
-        return None;
-    }
+    NaiveDate::from_ymd_opt(year_num, month_num, day_num)?;
 
     Some(format!("{}-{}-{}", year, month, day))
 }
