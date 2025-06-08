@@ -22,6 +22,9 @@ struct Cli {
     /// Disable creation of "month" directory.
     #[arg(long)]
     nomonth: bool,
+    /// Path to process.
+    #[arg(long)]
+    path: Vec<PathBuf>,
 }
 
 impl Cli {
@@ -30,6 +33,7 @@ impl Cli {
             nodecade: false,
             noyear: false,
             nomonth: false,
+            path: Vec::new(),
         }
     }
 }
@@ -48,6 +52,8 @@ fn process_directory(cli: &Cli, current_dir: &PathBuf) -> Result<(), std::io::Er
 
     // Словарь для хранения информации о файлах и их датах
     let mut file_date_map: Vec<(PathBuf, String)> = Vec::new();
+
+    println!("Обрабатываю директорию: {}", current_dir.display());
 
     // Первый проход: собираем информацию о файлах и датах
     let entries = fs::read_dir(current_dir)?;
@@ -232,10 +238,14 @@ fn main() -> std::io::Result<()> {
     let mut cli = binding.lock().unwrap();
     *cli = Cli::parse();
 
-    // Получаем текущую директорию
-    let current_dir = std::env::current_dir()?;
+    if cli.path.is_empty() {
+        println!("Пожалуйста, укажите пути для обработки (--path PATH).");
+        return Ok(());
+    }
 
-    process_directory(&cli, &current_dir)?;
+    for path in &cli.path {
+        process_directory(&cli, &path.canonicalize().unwrap())?;
+    }
 
     println!("Завершено!");
     Ok(())
