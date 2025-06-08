@@ -7,4 +7,5 @@ edition = "2024"
 chrono = "0.4.41"
 clap = { version = "4.5.39", features = ["derive"] }
 kamadak-exif = "0.6.1"
+notify = "8.0.0"
 regex = "1.11.1"

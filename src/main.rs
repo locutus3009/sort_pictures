@@ -1,18 +1,23 @@
 use chrono::NaiveDate;
 use clap::Parser;
 use exif::{In, Tag, Value};
+use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::Mutex;
 
 #[derive(Parser)]
 #[command(name = "sort_pictures")]
 #[command(about = "A program to re-order pictures in the directory")]
 struct Cli {
+    /// Run as a daemon.
+    #[arg(long)]
+    daemonize: bool,
     /// Disable creation of "decade" directory.
     #[arg(long)]
     nodecade: bool,
@@ -30,6 +35,7 @@ struct Cli {
 impl Cli {
     const fn empty() -> Self {
         Self {
+            daemonize: false,
             nodecade: false,
             noyear: false,
             nomonth: false,
@@ -245,6 +251,30 @@ fn main() -> std::io::Result<()> {
 
     for path in &cli.path {
         process_directory(&cli, &path.canonicalize().unwrap())?;
+    }
+
+    if cli.daemonize {
+        let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+
+        let mut watcher = notify::recommended_watcher(tx).unwrap();
+
+        for path in &cli.path {
+            watcher
+                .watch(&path.canonicalize().unwrap(), RecursiveMode::NonRecursive)
+                .unwrap();
+        }
+
+        for res in rx {
+            match res {
+                Ok(event) => {
+                    match event.kind {
+                        EventKind::Create(file) => println!("event: {:?}", event),
+                        _ => (),
+                    };
+                }
+                Err(e) => println!("watch error: {:?}", e),
+            }
+        }
     }
 
     println!("Завершено!");
