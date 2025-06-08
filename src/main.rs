@@ -267,10 +267,7 @@ fn main() -> std::io::Result<()> {
         for res in rx {
             match res {
                 Ok(event) => {
-                    match event.kind {
-                        EventKind::Create(file) => println!("event: {:?}", event),
-                        _ => (),
-                    };
+                    if let EventKind::Create(file) = event.kind { println!("event: {:?}", event) };
                 }
                 Err(e) => println!("watch error: {:?}", e),
             }
