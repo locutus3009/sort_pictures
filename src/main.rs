@@ -267,7 +267,21 @@ fn main() -> std::io::Result<()> {
         for res in rx {
             match res {
                 Ok(event) => {
-                    if let EventKind::Create(file) = event.kind { println!("event: {:?}", event) };
+                    if let EventKind::Create(entity) = event.kind {
+                        if entity == notify::event::CreateKind::File {
+                            let path = &event.paths[0];
+                            if path.file_name().unwrap().to_string_lossy().starts_with(".")
+                                || path
+                                    .extension()
+                                    .is_some_and(|ext| ext == "sh" || ext == "rs")
+                            {
+                                println!("Skip: {}", path.display());
+                                continue;
+                            }
+
+                            println!("Process: {:?}", path)
+                        }
+                    };
                 }
                 Err(e) => println!("watch error: {:?}", e),
             }
