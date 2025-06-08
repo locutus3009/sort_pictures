@@ -6,11 +6,44 @@ use regex::Regex;
 use chrono::NaiveDate;
 use std::ffi::OsStr;
 use exif::{In, Tag, Value};
+use clap::Parser;
+use std::sync::Mutex;
+
+#[derive(Parser)]
+#[command(name = "sort_pictures")]
+#[command(about = "A program to re-order pictures in the directory")]
+struct Cli {
+    /// Disable creation of "decade" directory.
+    #[arg(long)]
+    nodecade: bool,
+    /// Disable creation of "year" directory.
+    #[arg(long)]
+    noyear: bool,
+    /// Disable creation of "month" directory.
+    #[arg(long)]
+    nomonth: bool,
+}
+
+impl Cli {
+    const fn empty() -> Self {
+	Self {
+	    nodecade: false,
+	    noyear: false,
+	    nomonth: false,
+	}
+    }
+}
+
+const GLOBAL_PARAMS:Mutex<Cli> = Mutex::new(Cli::empty());
 
 fn main() -> std::io::Result<()> {
+    let binding = GLOBAL_PARAMS;
+    let mut cli = binding.lock().unwrap();
+    *cli = Cli::parse();
+    
     // Создаем регулярные выражения для различных форматов дат
-    let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}-\d{2}-\d{2})").unwrap();
-    let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}-\d{2}-\d{2})").unwrap();
+    let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
+    let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
     let yyyymmdd_regex = Regex::new(r"(\d{8})").unwrap();
     let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})").unwrap();
     
@@ -54,7 +87,7 @@ fn main() -> std::io::Result<()> {
         if !date_found {
             // Проверяем формат YYYY-MM-DD в начале файла
             if let Some(captures) = yyyy_mm_dd_prefix_regex.captures(&filename) {
-                let date_str = captures.get(1).unwrap().as_str().to_string();
+                let date_str = captures.get(1).unwrap().as_str().to_string().replace("_","-");
                 if is_valid_date(&date_str) {
                     date_dirs.insert(date_str.clone());
                     file_date_map.push((path.to_owned(), date_str));
@@ -67,7 +100,7 @@ fn main() -> std::io::Result<()> {
         if !date_found {
             let padded_filename = format!(" {}", filename);
             if let Some(captures) = yyyy_mm_dd_embedded_regex.captures(&padded_filename) {
-                let date_str = captures.get(1).unwrap().as_str().to_string();
+                let date_str = captures.get(1).unwrap().as_str().to_string().replace("_","-");
                 if is_valid_date(&date_str) {
                     date_dirs.insert(date_str.clone());
                     file_date_map.push((path.to_owned(), date_str));
@@ -120,11 +153,39 @@ fn main() -> std::io::Result<()> {
     // Создаем директории и перемещаем файлы
     for date in sorted_dates {
         println!("Обрабатываю дату: {}", date);
+
+	let parts: Vec<&str> = date.split('-').collect();
+	let year_str = parts[0];
+        let month = parts[1];
         
-        // Создаем директорию для даты, если она еще не существует
-        let date_dir = current_dir.join(date);
+        // Преобразуем строку в число
+        let year = year_str.parse::<i32>().unwrap();
+    
+        // Вычисляем начало и конец десятилетия
+        let decade_start = (year / 10) * 10; // Округляем до начала десятилетия
+        let decade_end = decade_start + 9;
+    
+        // Форматируем результат
+        let decade_range = &format!("{}-{}", decade_start, decade_end);
+
+	// Создаем директорию для даты, если она еще не существует
+        let mut date_dir = current_dir.clone();
+
+	if !cli.nodecade {
+	    date_dir = date_dir.join(decade_range);
+	}
+
+	if !cli.noyear {
+	    date_dir = date_dir.join(year_str);
+	}
+
+	if !cli.nomonth {
+	    date_dir = date_dir.join(month);
+	}
+
+	date_dir = date_dir.join(date);
         if !date_dir.exists() {
-            fs::create_dir(&date_dir)?;
+            fs::create_dir_all(&date_dir)?;
         }
         
         // Перемещаем файлы, соответствующие текущей дате
@@ -143,7 +204,7 @@ fn main() -> std::io::Result<()> {
             }
         }
         
-        println!("Файлы с датой {} перемещены в директорию {}", date, date);
+        println!("Файлы с датой {} перемещены в директорию {}/{}/{}/{}", date, decade_range, year, month, date);
     }
     
     println!("Завершено!");
