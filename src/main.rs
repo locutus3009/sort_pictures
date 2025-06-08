@@ -36,14 +36,7 @@ impl Cli {
 
 static GLOBAL_PARAMS: Mutex<Cli> = Mutex::new(Cli::empty());
 
-fn main() -> std::io::Result<()> {
-    let binding = &GLOBAL_PARAMS;
-    let mut cli = binding.lock().unwrap();
-    *cli = Cli::parse();
-
-    // Получаем текущую директорию
-    let current_dir = std::env::current_dir()?;
-
+fn process_directory(cli: &Cli, current_dir: &PathBuf) -> Result<(), std::io::Error> {
     // Создаем регулярные выражения для различных форматов дат
     let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
     let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
@@ -57,7 +50,7 @@ fn main() -> std::io::Result<()> {
     let mut file_date_map: Vec<(PathBuf, String)> = Vec::new();
 
     // Первый проход: собираем информацию о файлах и датах
-    let entries = fs::read_dir(&current_dir)?;
+    let entries = fs::read_dir(current_dir)?;
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
@@ -231,6 +224,19 @@ fn main() -> std::io::Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn main() -> std::io::Result<()> {
+    let binding = &GLOBAL_PARAMS;
+    let mut cli = binding.lock().unwrap();
+    *cli = Cli::parse();
+
+    // Получаем текущую директорию
+    let current_dir = std::env::current_dir()?;
+
+    process_directory(&cli, &current_dir)?;
+
     println!("Завершено!");
     Ok(())
 }
@@ -294,7 +300,11 @@ fn parse_exif_date(value: &Value) -> Option<String> {
                         month.parse::<u32>(),
                         day.parse::<u32>(),
                     ) {
-                        if (1990..=2099).contains(&y) && (1..=12).contains(&m) && (1..=31).contains(&d) && NaiveDate::from_ymd_opt(y, m, d).is_some() {
+                        if (1990..=2099).contains(&y)
+                            && (1..=12).contains(&m)
+                            && (1..=31).contains(&d)
+                            && NaiveDate::from_ymd_opt(y, m, d).is_some()
+                        {
                             return Some(format!("{}-{}-{}", year, month, day));
                         }
                     }
