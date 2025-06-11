@@ -1,6 +1,7 @@
 use chrono::NaiveDate;
 use clap::Parser;
 use exif::{In, Tag, Value};
+use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use std::collections::HashSet;
@@ -277,89 +278,71 @@ fn main() -> std::io::Result<()> {
         )?;
     }
 
+    if !cli.daemonize {
+        println!("Завершено!");
+        return Ok(());
+    }
+
     let mut tokens: Vec<_> = Vec::new();
-    if cli.daemonize {
-        for path in &cli.path {
-            let nodecade = cli.nodecade;
-            let noyear = cli.noyear;
-            let nomonth = cli.nomonth;
-            let path = path.clone();
+    for path in &cli.path {
+        let nodecade = cli.nodecade;
+        let noyear = cli.noyear;
+        let nomonth = cli.nomonth;
+        let path = path.clone();
 
-            let token = thread::spawn(move || {
-                let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+        let token = thread::spawn(move || {
+            let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
-                println!("Наблюдаю директорию {}", path.display());
+            println!("Наблюдаю директорию {}", path.display());
 
-                let mut watcher = notify::recommended_watcher(tx).unwrap();
+            let mut watcher = notify::recommended_watcher(tx).unwrap();
 
-                watcher
-                    .watch(&path.canonicalize().unwrap(), RecursiveMode::NonRecursive)
-                    .unwrap();
+            watcher
+                .watch(&path.canonicalize().unwrap(), RecursiveMode::NonRecursive)
+                .unwrap();
 
-                for res in rx {
-                    match res {
-                        Ok(event) => match event.kind {
-                            EventKind::Create(entity) => {
-                                if entity == notify::event::CreateKind::File {
-                                    let path = &event.paths[0];
-                                    if path.is_dir()
-                                        || path
-                                            .file_name()
-                                            .unwrap()
-                                            .to_string_lossy()
-                                            .starts_with(".")
-                                        || path
-                                            .extension()
-                                            .is_some_and(|ext| ext == "sh" || ext == "rs")
-                                    {
-                                        println!("Skip: {}", path.display());
-                                        continue;
-                                    }
-
-                                    process_fname(nodecade, noyear, nomonth, path.to_path_buf())
-                                        .unwrap();
-                                }
+            for res in rx {
+                match res {
+                    Ok(event) => match event.kind {
+                        EventKind::Create(CreateKind::File) => {
+                            let path = &event.paths[0];
+                            if path.is_dir()
+                                || path.file_name().unwrap().to_string_lossy().starts_with(".")
+                                || path
+                                    .extension()
+                                    .is_some_and(|ext| ext == "sh" || ext == "rs")
+                            {
+                                println!("Skip: {}", path.display());
+                                continue;
                             }
-                            EventKind::Modify(entity) => {
-                                if let notify::event::ModifyKind::Name(cat) = entity {
-                                    if cat == notify::event::RenameMode::To {
-                                        let path = &event.paths[0];
-                                        if path.is_dir()
-                                            || path
-                                                .file_name()
-                                                .unwrap()
-                                                .to_string_lossy()
-                                                .starts_with(".")
-                                            || path
-                                                .extension()
-                                                .is_some_and(|ext| ext == "sh" || ext == "rs")
-                                        {
-                                            println!("Skip: {}", path.display());
-                                            continue;
-                                        }
 
-                                        process_fname(
-                                            nodecade,
-                                            noyear,
-                                            nomonth,
-                                            path.to_path_buf(),
-                                        )
-                                        .unwrap();
-                                    }
-                                }
+                            process_fname(nodecade, noyear, nomonth, path.to_path_buf()).unwrap();
+                        }
+                        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
+                            let path = &event.paths[0];
+                            if path.is_dir()
+                                || path.file_name().unwrap().to_string_lossy().starts_with(".")
+                                || path
+                                    .extension()
+                                    .is_some_and(|ext| ext == "sh" || ext == "rs")
+                            {
+                                println!("Skip: {}", path.display());
+                                continue;
                             }
-                            _ => (),
-                        },
-                        Err(e) => println!("watch error: {:?}", e),
-                    }
+
+                            process_fname(nodecade, noyear, nomonth, path.to_path_buf()).unwrap();
+                        }
+                        _ => (),
+                    },
+                    Err(e) => println!("watch error: {:?}", e),
                 }
-            });
-            tokens.push(token);
-        }
+            }
+        });
+        tokens.push(token);
+    }
 
-        for token in tokens {
-            token.join().unwrap();
-        }
+    for token in tokens {
+        token.join().unwrap();
     }
 
     println!("Завершено!");
