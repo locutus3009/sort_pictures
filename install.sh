@@ -10,6 +10,7 @@ echo "Установка sort_pictures сервиса..."
 echo "Создание директорий..."
 mkdir -p ~/apps/bin/
 mkdir -p ~/.config/systemd/user/
+mkdir -p ~/.config/sort_pictures/
 
 # Остановка сервиса если запущен
 if systemctl --user is-active --quiet sort_pictures.service; then
@@ -21,6 +22,7 @@ fi
 echo "Копирование файлов..."
 cp target/release/sort_pictures ~/apps/bin/
 cp systemd/sort_pictures.service ~/.config/systemd/user/sort_pictures.service
+cp systemd/config.toml ~/.config/sort_pictures/config.toml
 
 # Установка прав на выполнение
 echo "Установка прав..."

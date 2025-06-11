@@ -1,9 +1,10 @@
 use chrono::NaiveDate;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use exif::{In, Tag, Value};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -13,30 +14,41 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 
-#[derive(Parser, Clone)]
+#[derive(Parser, Deserialize, Serialize, Clone, Debug)]
 #[command(name = "sort_pictures")]
 #[command(about = "A program to re-order pictures in the directory")]
-struct Cli {
+struct Config {
+    /// Config file path (default: ~/.config/sort_pictures/config.toml)
+    #[arg(short, long)]
+    #[serde(skip)]
+    config: Option<PathBuf>,
+
     /// Run as a daemon.
     #[arg(long)]
+    #[serde(skip)]
     daemonize: bool,
     /// Disable creation of "decade" directory.
     #[arg(long)]
+    #[serde(default)]
     nodecade: bool,
     /// Disable creation of "year" directory.
     #[arg(long)]
+    #[serde(default)]
     noyear: bool,
     /// Disable creation of "month" directory.
     #[arg(long)]
+    #[serde(default)]
     nomonth: bool,
     /// Path to process.
     #[arg(long)]
+    #[serde(default)]
     path: Vec<PathBuf>,
 }
 
-impl Cli {
+impl Config {
     const fn empty() -> Self {
         Self {
+            config: None,
             daemonize: false,
             nodecade: false,
             noyear: false,
@@ -46,7 +58,7 @@ impl Cli {
     }
 }
 
-static GLOBAL_PARAMS: Mutex<Cli> = Mutex::new(Cli::empty());
+static GLOBAL_PARAMS: Mutex<Config> = Mutex::new(Config::empty());
 
 fn process_fname(
     nodecade: bool,
@@ -284,10 +296,62 @@ fn process_fname(
     Ok(())
 }
 
+fn load_config() -> Result<Config, std::io::Error> {
+    // Parse CLI first to get config file path
+    let cli_args = Config::parse();
+
+    let config_path = match &cli_args.config {
+        Some(path) => path.clone(),
+        None => {
+            let mut path = dirs::config_dir().unwrap();
+            path.push("sort_pictures");
+            std::fs::create_dir_all(&path)?;
+            path.push("config.toml");
+            path
+        }
+    };
+
+    // Load config from file
+    let mut config = if config_path.exists() {
+        let content = std::fs::read_to_string(&config_path)?;
+        toml::from_str::<Config>(&content).unwrap()
+    } else {
+        println!("Config file not found at {:?}, using defaults", config_path);
+        Config::empty()
+    };
+
+    // Now we need to check which CLI args were actually provided
+    // and override only those in the config
+    let matches = Config::command().get_matches();
+
+    if matches.get_flag("daemonize") {
+        config.daemonize = cli_args.daemonize;
+    }
+    if matches.get_flag("nodecade") {
+        config.nodecade = cli_args.nodecade;
+    }
+    if matches.get_flag("noyear") {
+        config.noyear = cli_args.noyear;
+    }
+    if matches.get_flag("nomonth") {
+        config.nomonth = cli_args.nomonth;
+    }
+    if matches.get_many::<PathBuf>("path").is_some() {
+        config.path = cli_args.path;
+    }
+
+    // Set the config path for reference
+    config.config = cli_args.config;
+
+    Ok(config)
+}
+
 fn main() -> std::io::Result<()> {
     let binding = &GLOBAL_PARAMS;
     let mut cli = binding.lock().unwrap();
-    *cli = Cli::parse();
+    *cli = load_config()?;
+
+    println!("Using config: {:?}", *cli);
 
     if cli.path.is_empty() {
         println!("Пожалуйста, укажите пути для обработки (--path PATH).");

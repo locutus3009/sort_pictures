@@ -1,0 +1,10 @@
+nodecade = false
+noyear = false
+nomonth = false
+
+path = [
+    "/hdd/locutus/Pictures/Screenshots",
+    "/hdd/locutus/Pictures/Хроника",
+    "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА",
+    "/hdd/locutus/Pictures/Фотографии Иры"
+]
