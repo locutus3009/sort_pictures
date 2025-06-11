@@ -10,8 +10,9 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::sync::Mutex;
+use std::thread;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(name = "sort_pictures")]
 #[command(about = "A program to re-order pictures in the directory")]
 struct Cli {
@@ -46,7 +47,12 @@ impl Cli {
 
 static GLOBAL_PARAMS: Mutex<Cli> = Mutex::new(Cli::empty());
 
-fn process_directory(cli: &Cli, current_dir: &PathBuf) -> Result<(), std::io::Error> {
+fn process_fname(
+    nodecade: bool,
+    noyear: bool,
+    nomonth: bool,
+    mut fname: PathBuf,
+) -> Result<(), std::io::Error> {
     // Создаем регулярные выражения для различных форматов дат
     let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
     let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
@@ -59,24 +65,37 @@ fn process_directory(cli: &Cli, current_dir: &PathBuf) -> Result<(), std::io::Er
     // Словарь для хранения информации о файлах и их датах
     let mut file_date_map: Vec<(PathBuf, String)> = Vec::new();
 
-    println!("Обрабатываю директорию: {}", current_dir.display());
+    println!("Обрабатываю путь: {}", fname.display());
+
+    let mut paths: Vec<PathBuf> = Vec::new();
 
     // Первый проход: собираем информацию о файлах и датах
-    let entries = fs::read_dir(current_dir)?;
-    for entry in entries {
-        let entry = entry?;
-        let path = entry.path();
+    if fname.is_dir() {
+        let entries = fs::read_dir(&fname)?;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
 
-        // Пропускаем директории и скрытые файлы
-        if path.is_dir()
-            || path.file_name().unwrap().to_string_lossy().starts_with(".")
-            || path
-                .extension()
-                .is_some_and(|ext| ext == "sh" || ext == "rs")
-        {
-            continue;
+            // Пропускаем директории и скрытые файлы
+            if path.is_dir()
+                || path.file_name().unwrap().to_string_lossy().starts_with(".")
+                || path
+                    .extension()
+                    .is_some_and(|ext| ext == "sh" || ext == "rs")
+            {
+                continue;
+            }
+
+            paths.push(path.clone());
         }
+    }
 
+    if fname.is_file() {
+        paths.push(fname.clone());
+        fname = fname.parent().unwrap().to_path_buf();
+    }
+
+    for path in paths {
         let filename = path.file_name().unwrap().to_string_lossy();
         let mut date_found = false;
 
@@ -195,17 +214,17 @@ fn process_directory(cli: &Cli, current_dir: &PathBuf) -> Result<(), std::io::Er
         let decade_range = &format!("{}-{}", decade_start, decade_end);
 
         // Создаем директорию для даты, если она еще не существует
-        let mut date_dir = current_dir.clone();
+        let mut date_dir = fname.clone();
 
-        if !cli.nodecade {
+        if !nodecade {
             date_dir = date_dir.join(decade_range);
         }
 
-        if !cli.noyear {
+        if !noyear {
             date_dir = date_dir.join(year_str);
         }
 
-        if !cli.nomonth {
+        if !nomonth {
             date_dir = date_dir.join(month);
         }
 
@@ -250,41 +269,96 @@ fn main() -> std::io::Result<()> {
     }
 
     for path in &cli.path {
-        process_directory(&cli, &path.canonicalize().unwrap())?;
+        process_fname(
+            cli.nodecade,
+            cli.noyear,
+            cli.nomonth,
+            path.canonicalize().unwrap(),
+        )?;
     }
 
+    let mut tokens: Vec<_> = Vec::new();
     if cli.daemonize {
-        let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
-
-        let mut watcher = notify::recommended_watcher(tx).unwrap();
-
         for path in &cli.path {
-            watcher
-                .watch(&path.canonicalize().unwrap(), RecursiveMode::NonRecursive)
-                .unwrap();
+            let nodecade = cli.nodecade;
+            let noyear = cli.noyear;
+            let nomonth = cli.nomonth;
+            let path = path.clone();
+
+            let token = thread::spawn(move || {
+                let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
+
+                println!("Наблюдаю директорию {}", path.display());
+
+                let mut watcher = notify::recommended_watcher(tx).unwrap();
+
+                watcher
+                    .watch(&path.canonicalize().unwrap(), RecursiveMode::NonRecursive)
+                    .unwrap();
+
+                for res in rx {
+                    match res {
+                        Ok(event) => match event.kind {
+                            EventKind::Create(entity) => {
+                                if entity == notify::event::CreateKind::File {
+                                    let path = &event.paths[0];
+                                    if path.is_dir()
+                                        || path
+                                            .file_name()
+                                            .unwrap()
+                                            .to_string_lossy()
+                                            .starts_with(".")
+                                        || path
+                                            .extension()
+                                            .is_some_and(|ext| ext == "sh" || ext == "rs")
+                                    {
+                                        println!("Skip: {}", path.display());
+                                        continue;
+                                    }
+
+                                    process_fname(nodecade, noyear, nomonth, path.to_path_buf())
+                                        .unwrap();
+                                }
+                            }
+                            EventKind::Modify(entity) => {
+                                if let notify::event::ModifyKind::Name(cat) = entity {
+                                    if cat == notify::event::RenameMode::To {
+                                        let path = &event.paths[0];
+                                        if path.is_dir()
+                                            || path
+                                                .file_name()
+                                                .unwrap()
+                                                .to_string_lossy()
+                                                .starts_with(".")
+                                            || path
+                                                .extension()
+                                                .is_some_and(|ext| ext == "sh" || ext == "rs")
+                                        {
+                                            println!("Skip: {}", path.display());
+                                            continue;
+                                        }
+
+                                        process_fname(
+                                            nodecade,
+                                            noyear,
+                                            nomonth,
+                                            path.to_path_buf(),
+                                        )
+                                        .unwrap();
+                                    }
+                                }
+                            }
+                            _ => (),
+                        },
+                        Err(e) => println!("watch error: {:?}", e),
+                    }
+                }
+            });
+            tokens.push(token);
         }
 
-        for res in rx {
-            match res {
-                Ok(event) => {
-                    if let EventKind::Create(entity) = event.kind {
-                        if entity == notify::event::CreateKind::File {
-                            let path = &event.paths[0];
-                            if path.file_name().unwrap().to_string_lossy().starts_with(".")
-                                || path
-                                    .extension()
-                                    .is_some_and(|ext| ext == "sh" || ext == "rs")
-                            {
-                                println!("Skip: {}", path.display());
-                                continue;
-                            }
-
-                            println!("Process: {:?}", path)
-                        }
-                    };
-                }
-                Err(e) => println!("watch error: {:?}", e),
-            }
+        for token in tokens {
+            token.join().unwrap();
         }
     }
 
