@@ -14,6 +14,8 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 
+mod path;
+
 #[derive(Deserialize, Serialize, Clone, Debug)]
 struct Dir {
     /// Source directory to monitor files.
@@ -237,7 +239,7 @@ fn process_fname(
 
         // Создаем директорию для даты, если она еще не существует
         let mut date_dir = if let Some(d) = &target_dir {
-            d.clone()
+            d.clone().canonicalize().unwrap()
         } else {
             fname.clone()
         };
@@ -288,11 +290,13 @@ fn process_fname(
 
                 let source = fname.join(filename);
                 let target = target_path.clone();
+                let (base, rel_source, rel_target) = path::find_common_base(&source, &target);
 
                 print!(
-                    "Move: \"{}\" -> \"{}\"... ",
-                    source.to_string_lossy(),
-                    target.to_string_lossy()
+                    "Move: \"{}\"/{{\"{}\" -> \"{}\"}}... ",
+                    base.to_string_lossy(),
+                    rel_source.to_string_lossy(),
+                    rel_target.to_string_lossy()
                 );
                 io::stdout().flush()?;
 
@@ -429,7 +433,7 @@ fn main() -> std::io::Result<()> {
                                     .extension()
                                     .is_some_and(|ext| ext == "sh" || ext == "rs")
                             {
-                                println!("Skip: {}", path.display());
+                                println!("Skip: \"{}\"", path.display());
                                 continue;
                             }
 
@@ -444,7 +448,7 @@ fn main() -> std::io::Result<()> {
                                     .extension()
                                     .is_some_and(|ext| ext == "sh" || ext == "rs")
                             {
-                                println!("Skip: {}", path.display());
+                                println!("Skip: \"{}\"", path.display());
                                 continue;
                             }
 
