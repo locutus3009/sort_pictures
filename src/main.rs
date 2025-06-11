@@ -238,9 +238,34 @@ fn process_fname(
         for (file_path, file_date) in &file_date_map {
             if file_date == date && file_path.exists() {
                 let filename = file_path.file_name().unwrap();
-                let target_path = date_dir.join(filename);
+                let target_path = {
+                    let original_path = date_dir.join(filename);
+                    if !original_path.exists() {
+                        original_path
+                    } else {
+                        let stem = original_path.file_stem().unwrap().to_string_lossy();
+                        let extension = original_path
+                            .extension()
+                            .map(|ext| format!(".{}", ext.to_string_lossy()))
+                            .unwrap_or_default();
 
-                print!("  Перемещение файла: {}... ", filename.to_string_lossy());
+                        let mut counter = 1;
+                        loop {
+                            let new_name = format!("{}-{}{}", stem, counter, extension);
+                            let new_path = date_dir.join(new_name);
+                            if !new_path.exists() {
+                                break new_path;
+                            }
+                            counter += 1;
+                        }
+                    }
+                };
+
+                print!(
+                    "  Перемещение файла: {} -> {}... ",
+                    filename.to_string_lossy(),
+                    target_path.to_string_lossy()
+                );
                 io::stdout().flush()?;
 
                 match fs::rename(file_path, &target_path) {
