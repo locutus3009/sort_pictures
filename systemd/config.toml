@@ -1,10 +1,39 @@
-nodecade = false
-noyear = false
-nomonth = false
+[[dirs]]
+source = "/hdd/locutus/Pictures/Screenshots"
 
-path = [
-    "/hdd/locutus/Pictures/Screenshots",
-    "/hdd/locutus/Pictures/Хроника",
-    "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА",
-    "/hdd/locutus/Pictures/Фотографии Иры"
-]
+[[dirs]]
+source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Screenshots"
+target = "/hdd/locutus/Pictures/Screenshots"
+
+[[dirs]]
+source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Screen recordings"
+target = "/hdd/locutus/Pictures/Screenshots"
+
+[[dirs]]
+source = "/hdd/locutus/Pictures/Хроника"
+
+[[dirs]]
+source = "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА"
+
+[[dirs]]
+source = "/hdd/locutus/Pictures/Спорт/Боулдеринг"
+
+[[dirs]]
+source = "/hdd/locutus/Pictures/Спорт/Похудение"
+
+[[dirs]]
+source = "/hdd/locutus/Pictures/Фотографии Иры"
+
+[[dirs]]
+source = "/home/locutus/dev/sort_pictures/tmp"
+target = "/home/locutus/dev/sort_pictures/tmp/sorted"
+# nodecade = true
+# noyear = true
+# nomonth = true
+
+#[[dirs]]
+#source = "/hdd/locutus/Pictures/Походы/ПВД/2015-06-06 Кросс-поход Вестры"
+#nodecade = true
+#noyear = true
+#nomonth = true
+

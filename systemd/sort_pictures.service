@@ -4,8 +4,7 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=/home/locutus/apps/bin/sort_pictures --daemonize --path /hdd/locutus/Pictures/Screenshots --path /hdd/locutus/Pictures/Хроника --path "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА" --path "/hdd/locutus/Pictures/Фотографии Иры"
-#ExecStart=/home/locutus/apps/bin/sort_pictures --daemonize --path /home/locutus/dev/sort_pictures/tmp
+ExecStart=/home/locutus/apps/bin/sort_pictures --daemonize
 Restart=always
 RestartSec=10
 Environment=HOME=%h

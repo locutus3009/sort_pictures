@@ -45,22 +45,11 @@ struct Config {
     #[arg(long)]
     #[serde(skip)]
     daemonize: bool,
-    /// Disable creation of "decade" directory.
-    #[arg(long)]
+
+    /// Directory configurations
+    #[arg(skip)]
     #[serde(default)]
-    nodecade: bool,
-    /// Disable creation of "year" directory.
-    #[arg(long)]
-    #[serde(default)]
-    noyear: bool,
-    /// Disable creation of "month" directory.
-    #[arg(long)]
-    #[serde(default)]
-    nomonth: bool,
-    /// Path to process.
-    #[arg(long)]
-    #[serde(default)]
-    path: Vec<PathBuf>,
+    dirs: Vec<Dir>,
 }
 
 impl Config {
@@ -68,10 +57,7 @@ impl Config {
         Self {
             config: None,
             daemonize: false,
-            nodecade: false,
-            noyear: false,
-            nomonth: false,
-            path: Vec::new(),
+            dirs: Vec::new(),
         }
     }
 }
@@ -83,6 +69,7 @@ fn process_fname(
     noyear: bool,
     nomonth: bool,
     mut fname: PathBuf,
+    target_dir: &Option<PathBuf>,
 ) -> Result<(), std::io::Error> {
     // Создаем регулярные выражения для различных форматов дат
     let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
@@ -96,7 +83,7 @@ fn process_fname(
     // Словарь для хранения информации о файлах и их датах
     let mut file_date_map: Vec<(PathBuf, String)> = Vec::new();
 
-    println!("Обрабатываю путь: {}", fname.display());
+    //    println!("Обрабатываю путь: {}", fname.display());
 
     let mut paths: Vec<PathBuf> = Vec::new();
 
@@ -138,14 +125,16 @@ fn process_fname(
             .to_lowercase();
         if is_image_file(&extension) {
             if let Some(exif_date) = extract_date_from_exif(&path) {
-                let exif_date_clone = exif_date.clone();
+                //                let exif_date_clone = exif_date.clone();
                 date_dirs.insert(exif_date.clone());
                 file_date_map.push((path.to_owned(), exif_date));
                 date_found = true;
-                println!(
-                    "Найдена EXIF-дата для файла {}: {}",
-                    filename, exif_date_clone
-                );
+                /*
+                        println!(
+                            "Found EXIF date for file \"{}\": {}",
+                            filename, exif_date_clone
+                    );
+                */
             }
         }
 
@@ -217,18 +206,20 @@ fn process_fname(
     sorted_dates.sort();
 
     if sorted_dates.is_empty() {
-        println!("Не найдено файлов с датами");
+        //        println!("Files with date not found");
         return Ok(());
     }
 
-    println!("Найдены следующие даты:");
-    for date in &sorted_dates {
-        println!("- {}", date);
+    /*
+        println!("Найдены следующие даты:");
+        for date in &sorted_dates {
+            println!("- {}", date);
     }
+    */
 
     // Создаем директории и перемещаем файлы
     for date in sorted_dates {
-        println!("Обрабатываю дату: {}", date);
+        //        println!("Обрабатываю дату: {}", date);
 
         let parts: Vec<&str> = date.split('-').collect();
         let year_str = parts[0];
@@ -245,7 +236,11 @@ fn process_fname(
         let decade_range = &format!("{}-{}", decade_start, decade_end);
 
         // Создаем директорию для даты, если она еще не существует
-        let mut date_dir = fname.clone();
+        let mut date_dir = if let Some(d) = &target_dir {
+            d.clone()
+        } else {
+            fname.clone()
+        };
 
         if !nodecade {
             date_dir = date_dir.join(decade_range);
@@ -291,24 +286,29 @@ fn process_fname(
                     }
                 };
 
+                let source = fname.join(filename);
+                let target = target_path.clone();
+
                 print!(
-                    "  Перемещение файла: {} -> {}... ",
-                    filename.to_string_lossy(),
-                    target_path.to_string_lossy()
+                    "Move: \"{}\" -> \"{}\"... ",
+                    source.to_string_lossy(),
+                    target.to_string_lossy()
                 );
                 io::stdout().flush()?;
 
                 match fs::rename(file_path, &target_path) {
-                    Ok(_) => println!("успешно"),
-                    Err(e) => println!("ошибка: {}", e),
+                    Ok(_) => println!("success"),
+                    Err(e) => println!("error: {}", e),
                 }
             }
         }
 
+        /*
         println!(
-            "Файлы с датой {} перемещены в директорию {}/{}/{}/{}",
-            date, decade_range, year, month, date
+                "Файлы с датой {} перемещены в директорию {}/{}/{}/{}",
+                date, decade_range, year, month, date
         );
+         */
     }
 
     Ok(())
@@ -345,17 +345,9 @@ fn load_config() -> Result<Config, std::io::Error> {
     if matches.get_flag("daemonize") {
         config.daemonize = cli_args.daemonize;
     }
-    if matches.get_flag("nodecade") {
-        config.nodecade = cli_args.nodecade;
-    }
-    if matches.get_flag("noyear") {
-        config.noyear = cli_args.noyear;
-    }
-    if matches.get_flag("nomonth") {
-        config.nomonth = cli_args.nomonth;
-    }
-    if matches.get_many::<PathBuf>("path").is_some() {
-        config.path = cli_args.path;
+
+    if matches.get_many::<Dir>("dirs").is_some() {
+        config.dirs = cli_args.dirs;
     }
 
     // Set the config path for reference
@@ -369,38 +361,56 @@ fn main() -> std::io::Result<()> {
     let mut cli = binding.lock().unwrap();
     *cli = load_config()?;
 
-    println!("Using config: {:?}", *cli);
+    //    println!("Using config: {:?}", *cli);
+    for dir in &cli.dirs {
+        println!(
+            "Watch source: \"{}\"",
+            dir.source.clone().unwrap().to_string_lossy()
+        );
+        println!(
+            "      target: \"{}\"",
+            dir.target
+                .clone()
+                .unwrap_or(dir.source.clone().unwrap())
+                .to_string_lossy()
+        );
+        println!("      create decade dir: {}", !dir.nodecade);
+        println!("      create year dir:   {}", !dir.noyear);
+        println!("      create month dir:  {}", !dir.nomonth);
+    }
 
-    if cli.path.is_empty() {
-        println!("Пожалуйста, укажите пути для обработки (--path PATH).");
+    if cli.dirs.is_empty() {
+        println!("Please specify dirs to watch in config.toml.");
         return Ok(());
     }
 
-    for path in &cli.path {
+    for dir in &cli.dirs {
         process_fname(
-            cli.nodecade,
-            cli.noyear,
-            cli.nomonth,
-            path.canonicalize().unwrap(),
+            dir.nodecade,
+            dir.noyear,
+            dir.nomonth,
+            dir.source.clone().unwrap().canonicalize().unwrap(),
+            &dir.target,
         )?;
     }
 
     if !cli.daemonize {
-        println!("Завершено!");
+        println!("Finished!");
         return Ok(());
     }
 
     let mut tokens: Vec<_> = Vec::new();
-    for path in &cli.path {
-        let nodecade = cli.nodecade;
-        let noyear = cli.noyear;
-        let nomonth = cli.nomonth;
-        let path = path.clone();
+    for dir in &cli.dirs {
+        let nodecade = dir.nodecade;
+        let noyear = dir.noyear;
+        let nomonth = dir.nomonth;
+        let path = dir.source.clone().unwrap();
+        let target = dir.target.clone();
 
         let token = thread::spawn(move || {
             let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
 
-            println!("Наблюдаю директорию {}", path.display());
+            println!("Watch: \"{}\"", path.display());
 
             let mut watcher = notify::recommended_watcher(tx).unwrap();
 
@@ -423,7 +433,8 @@ fn main() -> std::io::Result<()> {
                                 continue;
                             }
 
-                            process_fname(nodecade, noyear, nomonth, path.to_path_buf()).unwrap();
+                            process_fname(nodecade, noyear, nomonth, path.to_path_buf(), &target)
+                                .unwrap();
                         }
                         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                             let path = &event.paths[0];
@@ -437,7 +448,8 @@ fn main() -> std::io::Result<()> {
                                 continue;
                             }
 
-                            process_fname(nodecade, noyear, nomonth, path.to_path_buf()).unwrap();
+                            process_fname(nodecade, noyear, nomonth, path.to_path_buf(), &target)
+                                .unwrap();
                         }
                         _ => (),
                     },
@@ -452,7 +464,7 @@ fn main() -> std::io::Result<()> {
         token.join().unwrap();
     }
 
-    println!("Завершено!");
+    println!("Finished!");
     Ok(())
 }
 
