@@ -14,6 +14,24 @@ use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
 
+#[derive(Deserialize, Serialize, Clone, Debug)]
+struct Dir {
+    /// Source directory to monitor files.
+    #[serde(default)]
+    source: Option<PathBuf>,
+    /// Target directory to save files.
+    #[serde(default)]
+    target: Option<PathBuf>,
+    #[serde(default)]
+    nodecade: bool,
+    /// Disable creation of "year" directory.
+    #[serde(default)]
+    noyear: bool,
+    /// Disable creation of "month" directory.
+    #[serde(default)]
+    nomonth: bool,
+}
+
 #[derive(Parser, Deserialize, Serialize, Clone, Debug)]
 #[command(name = "sort_pictures")]
 #[command(about = "A program to re-order pictures in the directory")]
