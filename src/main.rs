@@ -126,7 +126,7 @@ fn process_fname(
             .file_name()
             .ok_or("Cannot get file name")?
             .to_string_lossy();
-        let mut date_found = false;
+        let mut date_found = None;
 
         // Проверяем, является ли файл изображением, и пытаемся прочитать EXIF
 
@@ -136,9 +136,7 @@ fn process_fname(
                 if let Some((exif_date, gps_info)) = parse_exif(&mut parser, ms) {
                     //                let exif_date_clone = exif_date.clone();
                     println!("Position: {:?}", gps_info);
-                    date_dirs.insert(exif_date.clone());
-                    file_date_map.push((path.to_owned(), exif_date));
-                    date_found = true;
+                    date_found = Some(exif_date);
                     /*
                             println!(
                                 "Found EXIF date for file \"{}\": {}",
@@ -150,7 +148,7 @@ fn process_fname(
         }
 
         // Если EXIF не сработал, применяем анализ имени файла
-        if !date_found {
+        if date_found.is_none() {
             // Проверяем формат YYYY-MM-DD в начале файла
             if let Some(captures) = yyyy_mm_dd_prefix_regex.captures(&filename) {
                 let date_str = captures
@@ -160,15 +158,13 @@ fn process_fname(
                     .to_string()
                     .replace("_", "-");
                 if is_valid_date(&date_str) {
-                    date_dirs.insert(date_str.clone());
-                    file_date_map.push((path.to_owned(), date_str));
-                    date_found = true;
+                    date_found = Some(date_str);
                 }
             }
         }
 
         // Проверяем формат YYYY-MM-DD в середине строки
-        if !date_found {
+        if date_found.is_none() {
             let padded_filename = format!(" {}", filename);
             if let Some(captures) = yyyy_mm_dd_embedded_regex.captures(&padded_filename) {
                 let date_str = captures
@@ -178,37 +174,36 @@ fn process_fname(
                     .to_string()
                     .replace("_", "-");
                 if is_valid_date(&date_str) {
-                    date_dirs.insert(date_str.clone());
-                    file_date_map.push((path.to_owned(), date_str));
-                    date_found = true;
+                    date_found = Some(date_str);
                 }
             }
         }
 
         // Проверяем формат YYYY_MMDD (как в 2020_0718_064509_034.MP4)
-        if !date_found {
+        if date_found.is_none() {
             if let Some(captures) = yyyy_mmdd_regex.captures(&filename) {
                 let year = captures.get(1).ok_or("Cannot get captures")?.as_str();
                 let mmdd = captures.get(2).ok_or("Cannot get captures")?.as_str();
 
                 if let Some(date_str) = try_parse_yyyy_mmdd(year, mmdd) {
-                    date_dirs.insert(date_str.clone());
-                    file_date_map.push((path.to_owned(), date_str));
-                    date_found = true;
+                    date_found = Some(date_str);
                 }
             }
         }
 
         // Проверяем формат YYYYMMDD где-либо в имени файла
-        if !date_found {
+        if date_found.is_none() {
             if let Some(captures) = yyyymmdd_regex.captures(&filename) {
                 let date_part = captures.get(1).ok_or("Cannot get captures")?.as_str();
                 if let Some(date_str) = try_parse_yyyymmdd(date_part) {
-                    date_dirs.insert(date_str.clone());
-                    file_date_map.push((path.to_owned(), date_str));
-                    // date_found = true; -- не используется в дальнейшем
+                    date_found = Some(date_str);
                 }
             }
+        }
+
+        if let Some(date) = date_found {
+            date_dirs.insert(date.clone());
+            file_date_map.push((path.to_owned(), date));
         }
     }
 
