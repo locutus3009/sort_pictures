@@ -1,7 +1,9 @@
 use chrono::Datelike;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser};
-use nom_exif::{Exif, ExifIter, ExifTag, GPSInfo, MediaParser, MediaSource};
+use nom_exif::{
+    Exif, ExifIter, ExifTag, GPSInfo, MediaParser, MediaSource, TrackInfo, TrackInfoTag,
+};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
@@ -127,6 +129,7 @@ fn process_fname(
             .ok_or("Cannot get file name")?
             .to_string_lossy();
         let mut date_found = None;
+        let mut gps_data = None;
 
         // Проверяем, является ли файл изображением, и пытаемся прочитать EXIF
 
@@ -135,14 +138,14 @@ fn process_fname(
             if ms.has_exif() {
                 if let Some((exif_date, gps_info)) = parse_exif(&mut parser, ms) {
                     //                let exif_date_clone = exif_date.clone();
-                    println!("Position: {:?}", gps_info);
                     date_found = Some(exif_date);
-                    /*
-                            println!(
-                                "Found EXIF date for file \"{}\": {}",
-                                filename, exif_date_clone
-                        );
-                    */
+                    gps_data = gps_info;
+                }
+            } else if ms.has_track() {
+                if let Some((exif_date, gps_info)) = parse_track(&mut parser, ms) {
+                    //                let exif_date_clone = exif_date.clone();
+                    date_found = Some(exif_date);
+                    gps_data = gps_info;
                 }
             }
         }
@@ -199,6 +202,10 @@ fn process_fname(
                     date_found = Some(date_str);
                 }
             }
+        }
+
+        if let Some(gps) = gps_data {
+            println!("Position: {:?}", gps.format_iso6709(),);
         }
 
         if let Some(date) = date_found {
@@ -506,6 +513,38 @@ fn parse_exif<T: std::io::Read + std::io::Seek>(
             result_date = Some((
                 format!("{:04}-{:02}-{:02}", time.year(), time.month(), time.day()),
                 exif.get_gps_info().unwrap(),
+            ));
+            break;
+        }
+    }
+
+    result_date
+}
+
+fn parse_track<T: std::io::Read + std::io::Seek>(
+    parser: &mut MediaParser,
+    ms: MediaSource<T>,
+) -> Option<(String, Option<GPSInfo>)> {
+    let track: TrackInfo = match parser.parse(ms) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Cannot parse: {}", e);
+            return None;
+        }
+    };
+
+    // Приоритет тегов для даты создания
+    let date_tags = [
+        TrackInfoTag::CreateDate, // Стандартная дата/время
+    ];
+
+    let mut result_date = None;
+    for &tag in &date_tags {
+        if let Some(field) = track.get(tag) {
+            let time = field.as_time().unwrap();
+            result_date = Some((
+                format!("{:04}-{:02}-{:02}", time.year(), time.month(), time.day()),
+                track.get_gps_info().cloned(),
             ));
             break;
         }
