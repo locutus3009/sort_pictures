@@ -1,7 +1,7 @@
 use chrono::Datelike;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser};
-use nom_exif::{Exif, ExifIter, ExifTag, MediaParser, MediaSource};
+use nom_exif::{Exif, ExifIter, ExifTag, GPSInfo, MediaParser, MediaSource};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
@@ -133,8 +133,9 @@ fn process_fname(
         let msr = MediaSource::file_path(&path);
         if let Ok(ms) = msr {
             if ms.has_exif() {
-                if let Some(exif_date) = extract_date_from_exif(&mut parser, ms) {
+                if let Some((exif_date, gps_info)) = parse_exif(&mut parser, ms) {
                     //                let exif_date_clone = exif_date.clone();
+                    println!("Position: {:?}", gps_info);
                     date_dirs.insert(exif_date.clone());
                     file_date_map.push((path.to_owned(), exif_date));
                     date_found = true;
@@ -484,10 +485,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 }
 
 // Функция для извлечения даты из EXIF метаданных
-fn extract_date_from_exif<T: std::io::Read + std::io::Seek>(
+fn parse_exif<T: std::io::Read + std::io::Seek>(
     parser: &mut MediaParser,
     ms: MediaSource<T>,
-) -> Option<String> {
+) -> Option<(String, Option<GPSInfo>)> {
     let iter: ExifIter = match parser.parse(ms) {
         Ok(p) => p,
         Err(e) => {
@@ -507,7 +508,10 @@ fn extract_date_from_exif<T: std::io::Read + std::io::Seek>(
     for &tag in &date_tags {
         if let Some(field) = exif.get(tag) {
             let time = field.as_time().unwrap();
-            result_date = Some(format!("{}-{}-{}", time.year(), time.month(), time.day()));
+            result_date = Some((
+                format!("{:04}-{:02}-{:02}", time.year(), time.month(), time.day()),
+                exif.get_gps_info().unwrap(),
+            ));
             break;
         }
     }
