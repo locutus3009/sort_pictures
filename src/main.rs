@@ -37,6 +37,33 @@ struct Dir {
     nomonth: bool,
 }
 
+#[derive(Deserialize, Serialize, Clone, Debug)]
+struct Place {
+    /// Target directory to save files.
+    #[serde(default)]
+    target: Option<PathBuf>,
+    #[serde(default)]
+    nodecade: bool,
+    /// Disable creation of "year" directory.
+    #[serde(default)]
+    noyear: bool,
+    /// Disable creation of "month" directory.
+    #[serde(default)]
+    nomonth: bool,
+    /// Radius to detect images.
+    #[serde(default)]
+    radius: f64,
+    /// Place's longitude.
+    #[serde(default)]
+    lon: f64,
+    /// Place's latitude.
+    #[serde(default)]
+    lat: f64,
+    /// Place's name.
+    #[serde(default)]
+    name: String,
+}
+
 #[derive(Parser, Deserialize, Serialize, Clone, Debug)]
 #[command(name = "sort_pictures")]
 #[command(about = "A program to re-order pictures in the directory")]
@@ -55,6 +82,11 @@ struct Config {
     #[arg(skip)]
     #[serde(default)]
     dirs: Vec<Dir>,
+
+    /// Places configurations
+    #[arg(skip)]
+    #[serde(default)]
+    places: Vec<Place>,
 }
 
 impl Config {
@@ -63,6 +95,7 @@ impl Config {
             config: None,
             daemonize: false,
             dirs: Vec::new(),
+            places: Vec::new(),
         }
     }
 }
@@ -75,6 +108,7 @@ fn process_fname(
     nomonth: bool,
     mut fname: PathBuf,
     target_dir: &Option<PathBuf>,
+    places: &Vec<Place>,
 ) -> Result<(), Box<dyn Error>> {
     // Создаем регулярные выражения для различных форматов дат
     let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})")?;
@@ -402,6 +436,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("      create month dir:  {}", !dir.nomonth);
     }
 
+    for place in &cli.places {
+        println!("Watch place: \"{}\"", place.name);
+    }
+
     if cli.dirs.is_empty() {
         println!("Please specify dirs to watch in config.toml.");
         return Ok(());
@@ -414,6 +452,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             dir.nomonth,
             dir.source.clone().ok_or("Cannot clone")?.canonicalize()?,
             &dir.target,
+            &cli.places,
         )?;
     }
 
@@ -429,6 +468,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         let nomonth = dir.nomonth;
         let path = dir.source.clone().unwrap();
         let target = dir.target.clone();
+        let places = cli.places.clone();
 
         let token = thread::spawn(move || {
             let (tx, rx) = mpsc::channel::<Result<Event, notify::Error>>();
@@ -456,8 +496,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
 
-                            process_fname(nodecade, noyear, nomonth, path.to_path_buf(), &target)
-                                .unwrap();
+                            process_fname(
+                                nodecade,
+                                noyear,
+                                nomonth,
+                                path.to_path_buf(),
+                                &target,
+                                &places,
+                            )
+                            .unwrap();
                         }
                         EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
                             let path = &event.paths[0];
@@ -471,8 +518,15 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 continue;
                             }
 
-                            process_fname(nodecade, noyear, nomonth, path.to_path_buf(), &target)
-                                .unwrap();
+                            process_fname(
+                                nodecade,
+                                noyear,
+                                nomonth,
+                                path.to_path_buf(),
+                                &target,
+                                &places,
+                            )
+                            .unwrap();
                         }
                         _ => (),
                     },

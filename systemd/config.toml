@@ -37,3 +37,9 @@ target = "/home/locutus/dev/sort_pictures/tmp/sorted"
 #noyear = true
 #nomonth = true
 
+[[places]]
+name = "CrossFit DD"
+radius = 0.3
+lon = 13.773699997693468
+lat = 51.027290646617715
+target = "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА"
