@@ -1,9 +1,9 @@
 use chrono::Datelike;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser};
-use nom_exif::{
-    Exif, ExifIter, ExifTag, GPSInfo, MediaParser, MediaSource, TrackInfo, TrackInfoTag,
-};
+use geo::{Distance, Geodesic, Point};
+use nom_exif::{Exif, ExifIter, ExifTag, MediaParser, MediaSource, TrackInfo, TrackInfoTag};
+use nom_exif::{GPSInfo, LatLng, URational};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
@@ -205,7 +205,12 @@ fn process_fname(
         }
 
         if let Some(gps) = gps_data {
-            println!("Position: {:?}", gps.format_iso6709(),);
+            const CFDD: (f64, f64) = (51.027290646617715, 13.773699997693468);
+            println!(
+                "Position: {:?}, distance to Crossfit DD: {:.2}km",
+                gps.format_iso6709(),
+                calculate_distance(&gps, &CFDD) / 1000.0
+            );
         }
 
         if let Some(date) = date_found {
@@ -627,4 +632,44 @@ fn try_parse_yyyy_mmdd(year: &str, mmdd: &str) -> Option<String> {
     NaiveDate::from_ymd_opt(year_num, month_num, day_num)?;
 
     Some(format!("{}-{}-{}", year, month, day))
+}
+
+fn urational_to_f64(rational: &URational) -> f64 {
+    rational.0 as f64 / rational.1 as f64
+}
+
+fn latlng_to_decimal_degrees(latlng: &LatLng) -> f64 {
+    let degrees = urational_to_f64(&latlng.0);
+    let minutes = urational_to_f64(&latlng.1);
+    let seconds = urational_to_f64(&latlng.2);
+
+    degrees
+        + minutes / 60.0
+        + if seconds > 1.0 {
+            seconds / 3600.0
+        } else {
+            seconds / 60.0
+        }
+}
+
+fn gps_to_decimal_point(gps: &GPSInfo) -> Point<f64> {
+    let mut lat = latlng_to_decimal_degrees(&gps.latitude);
+    let mut lon = latlng_to_decimal_degrees(&gps.longitude);
+
+    // Apply hemisphere references
+    if gps.latitude_ref == 'S' {
+        lat = -lat;
+    }
+    if gps.longitude_ref == 'W' {
+        lon = -lon;
+    }
+
+    Point::new(lon, lat) // geo crate uses (longitude, latitude) order
+}
+
+fn calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64)) -> f64 {
+    let gps_point = gps_to_decimal_point(gps);
+    let target = Point::new(target_coords.1, target_coords.0); // (lon, lat)
+
+    Geodesic.distance(gps_point, target)
 }
