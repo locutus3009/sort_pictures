@@ -8,7 +8,6 @@ use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
@@ -116,11 +115,8 @@ fn process_fname(
     let yyyymmdd_regex = Regex::new(r"(\d{8})")?;
     let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
 
-    // Множество для хранения уникальных дат в формате YYYY-MM-DD
-    let mut date_dirs: HashSet<String> = HashSet::new();
-
     // Словарь для хранения информации о файлах и их датах
-    let mut file_date_map: Vec<(PathBuf, String)> = Vec::new();
+    let mut file_date_map: Vec<(PathBuf, String, PathBuf, bool, bool, bool)> = Vec::new();
 
     //    println!("Обрабатываю путь: {}", fname.display());
 
@@ -238,42 +234,54 @@ fn process_fname(
             }
         }
 
+        let mut into_place = false;
         if let Some(gps) = gps_data {
-            const CFDD: (f64, f64) = (51.027290646617715, 13.773699997693468);
-            println!(
-                "Position: {:?}, distance to Crossfit DD: {:.2}km",
-                gps.format_iso6709(),
-                calculate_distance(&gps, &CFDD) / 1000.0
-            );
+            for place in places {
+                let pos: (f64, f64) = (place.lat, place.lon);
+                let distance = calculate_distance(&gps, &pos) / 1000.0;
+                if distance < place.radius {
+                    println!(
+                        "Found picture from {:?}, distance: {:.2}km",
+                        place.name, distance
+                    );
+                    file_date_map.push((
+                        path.to_owned(),
+                        date_found.clone().unwrap(),
+                        if let Some(d) = &place.target {
+                            d.clone().canonicalize()?
+                        } else {
+                            fname.clone()
+                        },
+                        place.nodecade,
+                        place.noyear,
+                        place.nomonth,
+                    ));
+                    into_place = true;
+                }
+            }
         }
 
-        if let Some(date) = date_found {
-            date_dirs.insert(date.clone());
-            file_date_map.push((path.to_owned(), date));
+        if !into_place {
+            if let Some(date) = date_found {
+                file_date_map.push((
+                    path.to_owned(),
+                    date,
+                    if let Some(d) = &target_dir {
+                        d.clone().canonicalize()?
+                    } else {
+                        fname.clone()
+                    },
+                    nodecade,
+                    noyear,
+                    nomonth,
+                ));
+            }
         }
     }
 
-    // Выводим найденные даты
-    let mut sorted_dates: Vec<&String> = date_dirs.iter().collect();
-    sorted_dates.sort();
-
-    if sorted_dates.is_empty() {
-        //        println!("Files with date not found");
-        return Ok(());
-    }
-
-    /*
-        println!("Найдены следующие даты:");
-        for date in &sorted_dates {
-            println!("- {}", date);
-    }
-    */
-
-    // Создаем директории и перемещаем файлы
-    for date in sorted_dates {
-        //        println!("Обрабатываю дату: {}", date);
-
-        let parts: Vec<&str> = date.split('-').collect();
+    // Перемещаем файлы, соответствующие текущей дате
+    for (file_path, file_date, target_dir, nodecade, noyear, nomonth) in &file_date_map {
+        let parts: Vec<&str> = file_date.split('-').collect();
         let year_str = parts[0];
         let month = parts[1];
 
@@ -288,11 +296,7 @@ fn process_fname(
         let decade_range = &format!("{}-{}", decade_start, decade_end);
 
         // Создаем директорию для даты, если она еще не существует
-        let mut date_dir = if let Some(d) = &target_dir {
-            d.clone().canonicalize()?
-        } else {
-            fname.clone()
-        };
+        let mut date_dir = target_dir.clone();
 
         if !nodecade {
             date_dir = date_dir.join(decade_range);
@@ -306,66 +310,56 @@ fn process_fname(
             date_dir = date_dir.join(month);
         }
 
-        date_dir = date_dir.join(date);
+        date_dir = date_dir.join(file_date);
         if !date_dir.exists() {
             fs::create_dir_all(&date_dir)?;
         }
 
-        // Перемещаем файлы, соответствующие текущей дате
-        for (file_path, file_date) in &file_date_map {
-            if file_date == date && file_path.exists() {
-                let filename = file_path.file_name().ok_or("Cannot get file name")?;
-                let target_path = {
-                    let original_path = date_dir.join(filename);
-                    if !original_path.exists() {
-                        original_path
-                    } else {
-                        let stem = original_path
-                            .file_stem()
-                            .ok_or("Cannot get file name non-extension portion")?
-                            .to_string_lossy();
-                        let extension = original_path
-                            .extension()
-                            .map(|ext| format!(".{}", ext.to_string_lossy()))
-                            .unwrap_or_default();
+        if file_path.exists() {
+            let filename = file_path.file_name().ok_or("Cannot get file name")?;
+            let target_path = {
+                let original_path = date_dir.join(filename);
+                if !original_path.exists() {
+                    original_path
+                } else {
+                    let stem = original_path
+                        .file_stem()
+                        .ok_or("Cannot get file name non-extension portion")?
+                        .to_string_lossy();
+                    let extension = original_path
+                        .extension()
+                        .map(|ext| format!(".{}", ext.to_string_lossy()))
+                        .unwrap_or_default();
 
-                        let mut counter = 1;
-                        loop {
-                            let new_name = format!("{}-{}{}", stem, counter, extension);
-                            let new_path = date_dir.join(new_name);
-                            if !new_path.exists() {
-                                break new_path;
-                            }
-                            counter += 1;
+                    let mut counter = 1;
+                    loop {
+                        let new_name = format!("{}-{}{}", stem, counter, extension);
+                        let new_path = date_dir.join(new_name);
+                        if !new_path.exists() {
+                            break new_path;
                         }
+                        counter += 1;
                     }
-                };
-
-                let source = fname.join(filename);
-                let target = target_path.clone();
-                let (base, rel_source, rel_target) = path::find_common_base(&source, &target);
-
-                print!(
-                    "Move: \"{}\"/{{\"{}\" -> \"{}\"}}... ",
-                    base.to_string_lossy(),
-                    rel_source.to_string_lossy(),
-                    rel_target.to_string_lossy()
-                );
-                io::stdout().flush()?;
-
-                match fs::rename(file_path, &target_path) {
-                    Ok(_) => println!("success"),
-                    Err(e) => println!("error: {}", e),
                 }
+            };
+
+            let source = fname.join(filename);
+            let target = target_path.clone();
+            let (base, rel_source, rel_target) = path::find_common_base(&source, &target);
+
+            print!(
+                "Move: \"{}\"/{{\"{}\" -> \"{}\"}}... ",
+                base.to_string_lossy(),
+                rel_source.to_string_lossy(),
+                rel_target.to_string_lossy()
+            );
+            io::stdout().flush()?;
+
+            match fs::rename(file_path, &target_path) {
+                Ok(_) => println!("success"),
+                Err(e) => println!("error: {}", e),
             }
         }
-
-        /*
-        println!(
-                "Файлы с датой {} перемещены в директорию {}/{}/{}/{}",
-                date, decade_range, year, month, date
-        );
-         */
     }
 
     Ok(())

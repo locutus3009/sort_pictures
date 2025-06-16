@@ -10,13 +10,11 @@ source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Screen recordings"
 target = "/hdd/locutus/Pictures/Screenshots"
 
 [[dirs]]
+source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Camera"
+target = "/hdd/locutus/Pictures/Хроника"
+
+[[dirs]]
 source = "/hdd/locutus/Pictures/Хроника"
-
-[[dirs]]
-source = "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА"
-
-[[dirs]]
-source = "/hdd/locutus/Pictures/Спорт/Боулдеринг"
 
 [[dirs]]
 source = "/hdd/locutus/Pictures/Спорт/Похудение"
@@ -43,3 +41,10 @@ radius = 0.3
 lon = 13.773699997693468
 lat = 51.027290646617715
 target = "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА"
+
+[[places]]
+name = "XXL Sport"
+radius = 0.3
+lon = 13.80521823683424
+lat = 51.01541069406181
+target = "/hdd/locutus/Pictures/Спорт/Боулдеринг"
