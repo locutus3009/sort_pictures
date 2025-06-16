@@ -1,16 +1,16 @@
+use chrono::Datelike;
 use chrono::NaiveDate;
 use clap::{CommandFactory, Parser};
-use exif::{In, Tag, Value};
+use nom_exif::{Exif, ExifIter, ExifTag, MediaParser, MediaSource};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::error::Error;
-use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
@@ -120,6 +120,7 @@ fn process_fname(
         fname = fname.parent().ok_or("Cannot get parent dir")?.to_path_buf();
     }
 
+    let mut parser = MediaParser::new();
     for path in paths {
         let filename = path
             .file_name()
@@ -128,23 +129,22 @@ fn process_fname(
         let mut date_found = false;
 
         // Проверяем, является ли файл изображением, и пытаемся прочитать EXIF
-        let extension = path
-            .extension()
-            .and_then(OsStr::to_str)
-            .unwrap_or("")
-            .to_lowercase();
-        if is_image_file(&extension) {
-            if let Some(exif_date) = extract_date_from_exif(&path) {
-                //                let exif_date_clone = exif_date.clone();
-                date_dirs.insert(exif_date.clone());
-                file_date_map.push((path.to_owned(), exif_date));
-                date_found = true;
-                /*
-                        println!(
-                            "Found EXIF date for file \"{}\": {}",
-                            filename, exif_date_clone
-                    );
-                */
+
+        let msr = MediaSource::file_path(&path);
+        if let Ok(ms) = msr {
+            if ms.has_exif() {
+                if let Some(exif_date) = extract_date_from_exif(&mut parser, ms) {
+                    //                let exif_date_clone = exif_date.clone();
+                    date_dirs.insert(exif_date.clone());
+                    file_date_map.push((path.to_owned(), exif_date));
+                    date_found = true;
+                    /*
+                            println!(
+                                "Found EXIF date for file \"{}\": {}",
+                                filename, exif_date_clone
+                        );
+                    */
+                }
             }
         }
 
@@ -483,98 +483,36 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Функция для определения, является ли файл изображением
-fn is_image_file(extension: &str) -> bool {
-    matches!(
-        extension,
-        "jpg" | "jpeg" | "png" | "gif" | "tiff" | "bmp" | "webp" | "heic" | "heif"
-    )
-}
-
 // Функция для извлечения даты из EXIF метаданных
-fn extract_date_from_exif(path: &Path) -> Option<String> {
-    let file = match std::fs::File::open(path) {
-        Ok(file) => file,
-        Err(_) => return None,
+fn extract_date_from_exif<T: std::io::Read + std::io::Seek>(
+    parser: &mut MediaParser,
+    ms: MediaSource<T>,
+) -> Option<String> {
+    let iter: ExifIter = match parser.parse(ms) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("Cannot parse: {}", e);
+            return None;
+        }
     };
-
-    let mut bufreader = std::io::BufReader::new(&file);
-    let exifreader = match exif::Reader::new().read_from_container(&mut bufreader) {
-        Ok(exif) => exif,
-        Err(_) => return None,
-    };
+    let exif: Exif = iter.into();
 
     // Приоритет тегов для даты создания
     let date_tags = [
-        Tag::DateTimeOriginal, // Дата и время создания оригинального изображения
-        Tag::DateTime,         // Стандартная дата/время
+        ExifTag::DateTimeOriginal, // Дата и время создания оригинального изображения
+        ExifTag::CreateDate,       // Стандартная дата/время
     ];
 
     let mut result_date = None;
     for &tag in &date_tags {
-        if let Some(field) = exifreader.get_field(tag, In::PRIMARY) {
-            if let Some(date_str) = parse_exif_date(&field.value) {
-                result_date = Some(date_str);
-                break;
-            }
+        if let Some(field) = exif.get(tag) {
+            let time = field.as_time().unwrap();
+            result_date = Some(format!("{}-{}-{}", time.year(), time.month(), time.day()));
+            break;
         }
     }
-
-    let latitude = exifreader
-        .get_field(Tag::GPSLatitude, In::PRIMARY)
-        .map(|f| f.clone().value);
-    let latitude_ref = exifreader
-        .get_field(Tag::GPSLatitudeRef, In::PRIMARY)
-        .map(|f| f.clone().value);
-    let longitude = exifreader
-        .get_field(Tag::GPSLongitude, In::PRIMARY)
-        .map(|f| f.clone().value);
-    let longitude_ref = exifreader
-        .get_field(Tag::GPSLongitudeRef, In::PRIMARY)
-        .map(|f| f.clone().value);
-    println!(
-        "GPS data: {:?}{:?} {:?}{:?}",
-        latitude, latitude_ref, longitude, longitude_ref
-    );
 
     result_date
-}
-
-// Функция для разбора даты из EXIF значения
-fn parse_exif_date(value: &Value) -> Option<String> {
-    if let Value::Ascii(vec) = value {
-        if !vec.is_empty() {
-            // EXIF дата обычно в формате "YYYY:MM:DD HH:MM:SS"
-            let date_str = String::from_utf8_lossy(&vec[0]);
-
-            // Преобразуем в нужный нам формат YYYY-MM-DD
-            if let Some(date_part) = date_str.split_whitespace().next() {
-                let parts: Vec<&str> = date_part.split(':').collect();
-                if parts.len() >= 3 {
-                    let year = parts[0];
-                    let month = parts[1];
-                    let day = parts[2];
-
-                    // Проверяем валидность даты
-                    if let (Ok(y), Ok(m), Ok(d)) = (
-                        year.parse::<i32>(),
-                        month.parse::<u32>(),
-                        day.parse::<u32>(),
-                    ) {
-                        if (1990..=2099).contains(&y)
-                            && (1..=12).contains(&m)
-                            && (1..=31).contains(&d)
-                            && NaiveDate::from_ymd_opt(y, m, d).is_some()
-                        {
-                            return Some(format!("{}-{}-{}", year, month, day));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }
 
 // Функция для проверки валидности даты в формате YYYY-MM-DD
