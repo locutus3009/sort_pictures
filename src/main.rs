@@ -6,6 +6,7 @@ use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+use std::error::Error;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Write};
@@ -72,12 +73,12 @@ fn process_fname(
     nomonth: bool,
     mut fname: PathBuf,
     target_dir: &Option<PathBuf>,
-) -> Result<(), std::io::Error> {
+) -> Result<(), Box<dyn Error>> {
     // Создаем регулярные выражения для различных форматов дат
-    let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
-    let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})").unwrap();
-    let yyyymmdd_regex = Regex::new(r"(\d{8})").unwrap();
-    let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})").unwrap();
+    let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})")?;
+    let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})")?;
+    let yyyymmdd_regex = Regex::new(r"(\d{8})")?;
+    let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
 
     // Множество для хранения уникальных дат в формате YYYY-MM-DD
     let mut date_dirs: HashSet<String> = HashSet::new();
@@ -98,7 +99,11 @@ fn process_fname(
 
             // Пропускаем директории и скрытые файлы
             if path.is_dir()
-                || path.file_name().unwrap().to_string_lossy().starts_with(".")
+                || path
+                    .file_name()
+                    .ok_or("Cannot get file name")?
+                    .to_string_lossy()
+                    .starts_with(".")
                 || path
                     .extension()
                     .is_some_and(|ext| ext == "sh" || ext == "rs")
@@ -112,11 +117,14 @@ fn process_fname(
 
     if fname.is_file() {
         paths.push(fname.clone());
-        fname = fname.parent().unwrap().to_path_buf();
+        fname = fname.parent().ok_or("Cannot get parent dir")?.to_path_buf();
     }
 
     for path in paths {
-        let filename = path.file_name().unwrap().to_string_lossy();
+        let filename = path
+            .file_name()
+            .ok_or("Cannot get file name")?
+            .to_string_lossy();
         let mut date_found = false;
 
         // Проверяем, является ли файл изображением, и пытаемся прочитать EXIF
@@ -146,7 +154,7 @@ fn process_fname(
             if let Some(captures) = yyyy_mm_dd_prefix_regex.captures(&filename) {
                 let date_str = captures
                     .get(1)
-                    .unwrap()
+                    .ok_or("Cannot get captures")?
                     .as_str()
                     .to_string()
                     .replace("_", "-");
@@ -164,7 +172,7 @@ fn process_fname(
             if let Some(captures) = yyyy_mm_dd_embedded_regex.captures(&padded_filename) {
                 let date_str = captures
                     .get(1)
-                    .unwrap()
+                    .ok_or("Cannot get capturese")?
                     .as_str()
                     .to_string()
                     .replace("_", "-");
@@ -179,8 +187,8 @@ fn process_fname(
         // Проверяем формат YYYY_MMDD (как в 2020_0718_064509_034.MP4)
         if !date_found {
             if let Some(captures) = yyyy_mmdd_regex.captures(&filename) {
-                let year = captures.get(1).unwrap().as_str();
-                let mmdd = captures.get(2).unwrap().as_str();
+                let year = captures.get(1).ok_or("Cannot get captures")?.as_str();
+                let mmdd = captures.get(2).ok_or("Cannot get captures")?.as_str();
 
                 if let Some(date_str) = try_parse_yyyy_mmdd(year, mmdd) {
                     date_dirs.insert(date_str.clone());
@@ -193,7 +201,7 @@ fn process_fname(
         // Проверяем формат YYYYMMDD где-либо в имени файла
         if !date_found {
             if let Some(captures) = yyyymmdd_regex.captures(&filename) {
-                let date_part = captures.get(1).unwrap().as_str();
+                let date_part = captures.get(1).ok_or("Cannot get captures")?.as_str();
                 if let Some(date_str) = try_parse_yyyymmdd(date_part) {
                     date_dirs.insert(date_str.clone());
                     file_date_map.push((path.to_owned(), date_str));
@@ -228,7 +236,7 @@ fn process_fname(
         let month = parts[1];
 
         // Преобразуем строку в число
-        let year = year_str.parse::<i32>().unwrap();
+        let year = year_str.parse::<i32>()?;
 
         // Вычисляем начало и конец десятилетия
         let decade_start = (year / 10) * 10; // Округляем до начала десятилетия
@@ -239,7 +247,7 @@ fn process_fname(
 
         // Создаем директорию для даты, если она еще не существует
         let mut date_dir = if let Some(d) = &target_dir {
-            d.clone().canonicalize().unwrap()
+            d.clone().canonicalize()?
         } else {
             fname.clone()
         };
@@ -264,13 +272,16 @@ fn process_fname(
         // Перемещаем файлы, соответствующие текущей дате
         for (file_path, file_date) in &file_date_map {
             if file_date == date && file_path.exists() {
-                let filename = file_path.file_name().unwrap();
+                let filename = file_path.file_name().ok_or("Cannot get file name")?;
                 let target_path = {
                     let original_path = date_dir.join(filename);
                     if !original_path.exists() {
                         original_path
                     } else {
-                        let stem = original_path.file_stem().unwrap().to_string_lossy();
+                        let stem = original_path
+                            .file_stem()
+                            .ok_or("Cannot get file name non-extension portion")?
+                            .to_string_lossy();
                         let extension = original_path
                             .extension()
                             .map(|ext| format!(".{}", ext.to_string_lossy()))
@@ -318,14 +329,14 @@ fn process_fname(
     Ok(())
 }
 
-fn load_config() -> Result<Config, std::io::Error> {
+fn load_config() -> Result<Config, Box<dyn Error>> {
     // Parse CLI first to get config file path
     let cli_args = Config::parse();
 
     let config_path = match &cli_args.config {
         Some(path) => path.clone(),
         None => {
-            let mut path = dirs::config_dir().unwrap();
+            let mut path = dirs::config_dir().ok_or("Cannot get config dir")?;
             path.push("sort_pictures");
             std::fs::create_dir_all(&path)?;
             path.push("config.toml");
@@ -336,7 +347,7 @@ fn load_config() -> Result<Config, std::io::Error> {
     // Load config from file
     let mut config = if config_path.exists() {
         let content = std::fs::read_to_string(&config_path)?;
-        toml::from_str::<Config>(&content).unwrap()
+        toml::from_str::<Config>(&content)?
     } else {
         println!("Config file not found at {:?}, using defaults", config_path);
         Config::empty()
@@ -360,22 +371,22 @@ fn load_config() -> Result<Config, std::io::Error> {
     Ok(config)
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<(), Box<dyn Error>> {
     let binding = &GLOBAL_PARAMS;
-    let mut cli = binding.lock().unwrap();
+    let mut cli = binding.lock()?;
     *cli = load_config()?;
 
     //    println!("Using config: {:?}", *cli);
     for dir in &cli.dirs {
         println!(
             "Watch source: \"{}\"",
-            dir.source.clone().unwrap().to_string_lossy()
+            dir.source.clone().ok_or("Cannot clone")?.to_string_lossy()
         );
         println!(
             "      target: \"{}\"",
             dir.target
                 .clone()
-                .unwrap_or(dir.source.clone().unwrap())
+                .unwrap_or(dir.source.clone().ok_or("Cannot clone")?)
                 .to_string_lossy()
         );
         println!("      create decade dir: {}", !dir.nodecade);
@@ -393,7 +404,7 @@ fn main() -> std::io::Result<()> {
             dir.nodecade,
             dir.noyear,
             dir.nomonth,
-            dir.source.clone().unwrap().canonicalize().unwrap(),
+            dir.source.clone().ok_or("Cannot clone")?.canonicalize()?,
             &dir.target,
         )?;
     }
@@ -499,15 +510,34 @@ fn extract_date_from_exif(path: &Path) -> Option<String> {
         Tag::DateTime,         // Стандартная дата/время
     ];
 
+    let mut result_date = None;
     for &tag in &date_tags {
         if let Some(field) = exifreader.get_field(tag, In::PRIMARY) {
             if let Some(date_str) = parse_exif_date(&field.value) {
-                return Some(date_str);
+                result_date = Some(date_str);
+                break;
             }
         }
     }
 
-    None
+    let latitude = exifreader
+        .get_field(Tag::GPSLatitude, In::PRIMARY)
+        .map(|f| f.clone().value);
+    let latitude_ref = exifreader
+        .get_field(Tag::GPSLatitudeRef, In::PRIMARY)
+        .map(|f| f.clone().value);
+    let longitude = exifreader
+        .get_field(Tag::GPSLongitude, In::PRIMARY)
+        .map(|f| f.clone().value);
+    let longitude_ref = exifreader
+        .get_field(Tag::GPSLongitudeRef, In::PRIMARY)
+        .map(|f| f.clone().value);
+    println!(
+        "GPS data: {:?}{:?} {:?}{:?}",
+        latitude, latitude_ref, longitude, longitude_ref
+    );
+
+    result_date
 }
 
 // Функция для разбора даты из EXIF значения
