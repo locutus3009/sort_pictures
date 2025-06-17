@@ -416,13 +416,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     for dir in &cli.dirs {
         println!(
             "Watch source: \"{}\"",
-            dir.source.clone().ok_or("Cannot clone")?.to_string_lossy()
+            dir.source.clone().ok_or("Cannot unwrap")?.to_string_lossy()
         );
         println!(
             "      target: \"{}\"",
             dir.target
                 .clone()
-                .unwrap_or(dir.source.clone().ok_or("Cannot clone")?)
+                .unwrap_or(dir.source.clone().ok_or("Cannot unwrap")?)
                 .to_string_lossy()
         );
         println!("      create decade dir: {}", !dir.nodecade);
@@ -432,6 +432,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     for place in &cli.places {
         println!("Watch place: \"{}\"", place.name);
+        println!(
+            "      target: \"{}\"",
+            place
+                .target
+                .clone()
+                .ok_or("Cannot unwrap")?
+                .to_string_lossy()
+        );
+        println!("      create decade dir: {}", !place.nodecade);
+        println!("      create year dir:   {}", !place.noyear);
+        println!("      create month dir:  {}", !place.nomonth);
     }
 
     if cli.dirs.is_empty() {
@@ -444,7 +455,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             dir.nodecade,
             dir.noyear,
             dir.nomonth,
-            dir.source.clone().ok_or("Cannot clone")?.canonicalize()?,
+            dir.source.clone().ok_or("Cannot unwrap")?.canonicalize()?,
             &dir.target,
             &cli.places,
         )?;
