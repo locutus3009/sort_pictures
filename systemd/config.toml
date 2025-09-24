@@ -10,6 +10,10 @@ source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Screen recordings"
 target = "/hdd/locutus/Pictures/Screenshots"
 
 [[dirs]]
+source = "/hdd/locutus/Videos/Screencasts"
+target = "/hdd/locutus/Pictures/Screenshots"
+
+[[dirs]]
 source = "/hdd/locutus/Devices/SM-S918U1/DCIM/Camera"
 target = "/hdd/locutus/Pictures/Хроника"
 
@@ -48,3 +52,10 @@ radius = 0.3
 lon = 13.80521823683424
 lat = 51.01541069406181
 target = "/hdd/locutus/Pictures/Спорт/Боулдеринг"
+
+[[places]]
+name = "CrossFit October"
+radius = 0.3
+lon = 37.49175831327975
+lat = 55.796361577887374
+target = "/hdd/locutus/Pictures/Спорт/Кроссфит и ТА"
