@@ -573,7 +573,7 @@ fn parse_exif<T: std::io::Read + std::io::Seek>(
     let mut result_date = None;
     for &tag in &date_tags {
         if let Some(field) = exif.get(tag) {
-            let time = field.as_time().unwrap();
+            let time = field.as_time()?;
             result_date = Some((
                 format!("{:04}-{:02}-{:02}", time.year(), time.month(), time.day()),
                 exif.get_gps_info().unwrap(),
