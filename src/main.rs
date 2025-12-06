@@ -1,135 +1,70 @@
+//! sort_pictures - Automatic photo and video organization by date.
+//!
+//! This daemon monitors directories for new photos and videos, extracts dates
+//! from EXIF metadata or filenames, and organizes them into a hierarchical
+//! directory structure.
+
 use chrono::Datelike;
 use chrono::NaiveDate;
-use clap::{CommandFactory, Parser};
-use geo::{Distance, Geodesic, Point};
+use nom_exif::GPSInfo;
 use nom_exif::{Exif, ExifIter, ExifTag, MediaParser, MediaSource, TrackInfo, TrackInfoTag};
-use nom_exif::{GPSInfo, LatLng, URational};
 use notify::event::{CreateKind, ModifyKind, RenameMode};
 use notify::{Event, EventKind, RecursiveMode, Watcher};
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::thread;
 
+mod config;
+mod gps;
 mod path;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-struct Dir {
-    /// Source directory to monitor files.
-    #[serde(default)]
-    source: Option<PathBuf>,
-    /// Target directory to save files.
-    #[serde(default)]
-    target: Option<PathBuf>,
-    #[serde(default)]
-    nodecade: bool,
-    /// Disable creation of "year" directory.
-    #[serde(default)]
-    noyear: bool,
-    /// Disable creation of "month" directory.
-    #[serde(default)]
-    nomonth: bool,
-}
+use config::{Config, Place, load_config};
+use gps::find_matching_place;
 
-#[derive(Deserialize, Serialize, Clone, Debug)]
-struct Place {
-    /// Target directory to save files.
-    #[serde(default)]
-    target: Option<PathBuf>,
-    #[serde(default)]
-    nodecade: bool,
-    /// Disable creation of "year" directory.
-    #[serde(default)]
-    noyear: bool,
-    /// Disable creation of "month" directory.
-    #[serde(default)]
-    nomonth: bool,
-    /// Radius to detect images.
-    #[serde(default)]
-    radius: f64,
-    /// Place's longitude.
-    #[serde(default)]
-    lon: f64,
-    /// Place's latitude.
-    #[serde(default)]
-    lat: f64,
-    /// Place's name.
-    #[serde(default)]
-    name: String,
-}
-
-#[derive(Parser, Deserialize, Serialize, Clone, Debug)]
-#[command(name = "sort_pictures")]
-#[command(about = "A program to re-order pictures in the directory")]
-struct Config {
-    /// Config file path (default: ~/.config/sort_pictures/config.toml)
-    #[arg(short, long)]
-    #[serde(skip)]
-    config: Option<PathBuf>,
-
-    /// Run as a daemon.
-    #[arg(long)]
-    #[serde(skip)]
-    daemonize: bool,
-
-    /// Directory configurations
-    #[arg(skip)]
-    #[serde(default)]
-    dirs: Vec<Dir>,
-
-    /// Places configurations
-    #[arg(skip)]
-    #[serde(default)]
-    places: Vec<Place>,
-}
-
-impl Config {
-    const fn empty() -> Self {
-        Self {
-            config: None,
-            daemonize: false,
-            dirs: Vec::new(),
-            places: Vec::new(),
-        }
-    }
-}
-
+/// Global configuration, protected by mutex for thread-safe access in daemon mode.
 static GLOBAL_PARAMS: Mutex<Config> = Mutex::new(Config::empty());
 
+/// Processes a file or directory, extracting dates and organizing files.
+///
+/// # Arguments
+/// * `nodecade` - Skip decade folder creation
+/// * `noyear` - Skip year folder creation
+/// * `nomonth` - Skip month folder creation
+/// * `fname` - Path to process (file or directory)
+/// * `target_dir` - Target directory for organized files
+/// * `places` - GPS-based place configurations
 fn process_fname(
     nodecade: bool,
     noyear: bool,
     nomonth: bool,
     mut fname: PathBuf,
     target_dir: &Option<PathBuf>,
-    places: &Vec<Place>,
+    places: &[Place],
 ) -> Result<(), Box<dyn Error>> {
-    // Создаем регулярные выражения для различных форматов дат
+    // Create regex patterns for various date formats
     let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})")?;
     let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})")?;
     let yyyymmdd_regex = Regex::new(r"(\d{8})")?;
     let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
 
-    // Словарь для хранения информации о файлах и их датах
+    // Storage for file info and dates
     let mut file_date_map: Vec<(PathBuf, String, PathBuf, bool, bool, bool)> = Vec::new();
-
-    //    println!("Обрабатываю путь: {}", fname.display());
 
     let mut paths: Vec<PathBuf> = Vec::new();
 
-    // Первый проход: собираем информацию о файлах и датах
+    // First pass: collect file information
     if fname.is_dir() {
         let entries = fs::read_dir(&fname)?;
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
 
-            // Пропускаем директории и скрытые файлы
+            // Skip directories and hidden files
             if path.is_dir()
                 || path
                     .file_name()
@@ -161,28 +96,25 @@ fn process_fname(
         let mut date_found = None;
         let mut gps_data = None;
 
-        // Проверяем, является ли файл изображением, и пытаемся прочитать EXIF
-
+        // Try to read EXIF from image files
         let msr = MediaSource::file_path(&path);
         if let Ok(ms) = msr {
             if ms.has_exif() {
                 if let Some((exif_date, gps_info)) = parse_exif(&mut parser, ms) {
-                    //                let exif_date_clone = exif_date.clone();
                     date_found = Some(exif_date);
                     gps_data = gps_info;
                 }
-            } else if ms.has_track() {
-                if let Some((exif_date, gps_info)) = parse_track(&mut parser, ms) {
-                    //                let exif_date_clone = exif_date.clone();
-                    date_found = Some(exif_date);
-                    gps_data = gps_info;
-                }
+            } else if ms.has_track()
+                && let Some((exif_date, gps_info)) = parse_track(&mut parser, ms)
+            {
+                date_found = Some(exif_date);
+                gps_data = gps_info;
             }
         }
 
-        // Если EXIF не сработал, применяем анализ имени файла
+        // If EXIF failed, try filename patterns
         if date_found.is_none() {
-            // Проверяем формат YYYY-MM-DD в начале файла
+            // Check YYYY-MM-DD format at start of filename
             if let Some(captures) = yyyy_mm_dd_prefix_regex.captures(&filename) {
                 let date_str = captures
                     .get(1)
@@ -196,13 +128,13 @@ fn process_fname(
             }
         }
 
-        // Проверяем формат YYYY-MM-DD в середине строки
+        // Check YYYY-MM-DD format in middle of string
         if date_found.is_none() {
             let padded_filename = format!(" {}", filename);
             if let Some(captures) = yyyy_mm_dd_embedded_regex.captures(&padded_filename) {
                 let date_str = captures
                     .get(1)
-                    .ok_or("Cannot get capturese")?
+                    .ok_or("Cannot get captures")?
                     .as_str()
                     .to_string()
                     .replace("_", "-");
@@ -212,90 +144,82 @@ fn process_fname(
             }
         }
 
-        // Проверяем формат YYYY_MMDD (как в 2020_0718_064509_034.MP4)
-        if date_found.is_none() {
-            if let Some(captures) = yyyy_mmdd_regex.captures(&filename) {
-                let year = captures.get(1).ok_or("Cannot get captures")?.as_str();
-                let mmdd = captures.get(2).ok_or("Cannot get captures")?.as_str();
+        // Check YYYY_MMDD format (e.g., 2020_0718_064509.MP4)
+        if date_found.is_none()
+            && let Some(captures) = yyyy_mmdd_regex.captures(&filename)
+        {
+            let year = captures.get(1).ok_or("Cannot get captures")?.as_str();
+            let mmdd = captures.get(2).ok_or("Cannot get captures")?.as_str();
 
-                if let Some(date_str) = try_parse_yyyy_mmdd(year, mmdd) {
-                    date_found = Some(date_str);
-                }
+            if let Some(date_str) = try_parse_yyyy_mmdd(year, mmdd) {
+                date_found = Some(date_str);
             }
         }
 
-        // Проверяем формат YYYYMMDD где-либо в имени файла
-        if date_found.is_none() {
-            if let Some(captures) = yyyymmdd_regex.captures(&filename) {
-                let date_part = captures.get(1).ok_or("Cannot get captures")?.as_str();
-                if let Some(date_str) = try_parse_yyyymmdd(date_part) {
-                    date_found = Some(date_str);
-                }
+        // Check YYYYMMDD format anywhere in filename
+        if date_found.is_none()
+            && let Some(captures) = yyyymmdd_regex.captures(&filename)
+        {
+            let date_part = captures.get(1).ok_or("Cannot get captures")?.as_str();
+            if let Some(date_str) = try_parse_yyyymmdd(date_part) {
+                date_found = Some(date_str);
             }
         }
 
+        // Check GPS data against configured places
         let mut into_place = false;
-        if let Some(gps) = gps_data {
-            for place in places {
-                let pos: (f64, f64) = (place.lat, place.lon);
-                let distance = calculate_distance(&gps, &pos) / 1000.0;
-                if distance < place.radius {
-                    println!(
-                        "Found picture from {:?}, distance: {:.2}km",
-                        place.name, distance
-                    );
-                    file_date_map.push((
-                        path.to_owned(),
-                        date_found.clone().unwrap(),
-                        if let Some(d) = &place.target {
-                            d.clone().canonicalize()?
-                        } else {
-                            fname.clone()
-                        },
-                        place.nodecade,
-                        place.noyear,
-                        place.nomonth,
-                    ));
-                    into_place = true;
-                }
-            }
+        if let Some(ref gps) = gps_data
+            && let Some(place_match) = find_matching_place(gps, places)
+        {
+            println!(
+                "Found picture from {:?}, distance: {:.2}km",
+                place_match.place.name, place_match.distance_km
+            );
+            file_date_map.push((
+                path.to_owned(),
+                date_found.clone().unwrap(),
+                if let Some(d) = &place_match.place.target {
+                    d.clone().canonicalize()?
+                } else {
+                    fname.clone()
+                },
+                place_match.place.nodecade,
+                place_match.place.noyear,
+                place_match.place.nomonth,
+            ));
+            into_place = true;
         }
 
-        if !into_place {
-            if let Some(date) = date_found {
-                file_date_map.push((
-                    path.to_owned(),
-                    date,
-                    if let Some(d) = &target_dir {
-                        d.clone().canonicalize()?
-                    } else {
-                        fname.clone()
-                    },
-                    nodecade,
-                    noyear,
-                    nomonth,
-                ));
-            }
+        if !into_place && let Some(date) = date_found {
+            file_date_map.push((
+                path.to_owned(),
+                date,
+                if let Some(d) = &target_dir {
+                    d.clone().canonicalize()?
+                } else {
+                    fname.clone()
+                },
+                nodecade,
+                noyear,
+                nomonth,
+            ));
         }
     }
 
-    // Перемещаем файлы, соответствующие текущей дате
+    // Move files to their date-based directories
     for (file_path, file_date, target_dir, nodecade, noyear, nomonth) in &file_date_map {
         let parts: Vec<&str> = file_date.split('-').collect();
         let year_str = parts[0];
         let month = parts[1];
 
-        // Преобразуем строку в число
         let year = year_str.parse::<i32>()?;
 
-        // Вычисляем начало и конец десятилетия
-        let decade_start = (year / 10) * 10; // Округляем до начала десятилетия
+        // Calculate decade range
+        let decade_start = (year / 10) * 10;
         let decade_end = decade_start + 9;
-
-        // Форматируем результат
         let decade_range = &format!("{}-{}", decade_start, decade_end);
 
-        // Создаем директорию для даты, если она еще не существует
+        // Build target directory path
         let mut date_dir = target_dir.clone();
 
         if !nodecade {
@@ -322,6 +246,7 @@ fn process_fname(
                 if !original_path.exists() {
                     original_path
                 } else {
+                    // Handle filename collisions with -N suffix
                     let stem = original_path
                         .file_stem()
                         .ok_or("Cannot get file name non-extension portion")?
@@ -347,6 +272,7 @@ fn process_fname(
             let target = target_path.clone();
             let (base, rel_source, rel_target) = path::find_common_base(&source, &target);
 
+            // Small delay for filesystem sync
             std::thread::sleep(std::time::Duration::from_millis(1000));
             print!(
                 "Move: \"{}\"/{{\"{}\" -> \"{}\"}}... ",
@@ -366,54 +292,11 @@ fn process_fname(
     Ok(())
 }
 
-fn load_config() -> Result<Config, Box<dyn Error>> {
-    // Parse CLI first to get config file path
-    let cli_args = Config::parse();
-
-    let config_path = match &cli_args.config {
-        Some(path) => path.clone(),
-        None => {
-            let mut path = dirs::config_dir().ok_or("Cannot get config dir")?;
-            path.push("sort_pictures");
-            std::fs::create_dir_all(&path)?;
-            path.push("config.toml");
-            path
-        }
-    };
-
-    // Load config from file
-    let mut config = if config_path.exists() {
-        let content = std::fs::read_to_string(&config_path)?;
-        toml::from_str::<Config>(&content)?
-    } else {
-        println!("Config file not found at {:?}, using defaults", config_path);
-        Config::empty()
-    };
-
-    // Now we need to check which CLI args were actually provided
-    // and override only those in the config
-    let matches = Config::command().get_matches();
-
-    if matches.get_flag("daemonize") {
-        config.daemonize = cli_args.daemonize;
-    }
-
-    if matches.get_many::<Dir>("dirs").is_some() {
-        config.dirs = cli_args.dirs;
-    }
-
-    // Set the config path for reference
-    config.config = cli_args.config;
-
-    Ok(config)
-}
-
 fn main() -> Result<(), Box<dyn Error>> {
     let binding = &GLOBAL_PARAMS;
     let mut cli = binding.lock()?;
     *cli = load_config()?;
 
-    //    println!("Using config: {:?}", *cli);
     for dir in &cli.dirs {
         println!(
             "Watch source: \"{}\"",
@@ -551,7 +434,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-// Функция для извлечения даты из EXIF метаданных
+/// Extracts date and GPS info from EXIF metadata.
 fn parse_exif<T: std::io::Read + std::io::Seek>(
     parser: &mut MediaParser,
     ms: MediaSource<T>,
@@ -565,11 +448,11 @@ fn parse_exif<T: std::io::Read + std::io::Seek>(
     };
     let exif: Exif = iter.into();
 
-    // Приоритет тегов для даты создания
+    // Priority order for date tags
     let date_tags = [
-        ExifTag::DateTimeOriginal, // Дата и время создания оригинального изображения
-        ExifTag::CreateDate,       // Стандартная дата/время
-        ExifTag::ModifyDate,       // Дата последней модификации
+        ExifTag::DateTimeOriginal,
+        ExifTag::CreateDate,
+        ExifTag::ModifyDate,
     ];
 
     let mut result_date = None;
@@ -594,6 +477,7 @@ fn parse_exif<T: std::io::Read + std::io::Seek>(
     result_date
 }
 
+/// Extracts date and GPS info from video track metadata.
 fn parse_track<T: std::io::Read + std::io::Seek>(
     parser: &mut MediaParser,
     ms: MediaSource<T>,
@@ -606,10 +490,7 @@ fn parse_track<T: std::io::Read + std::io::Seek>(
         }
     };
 
-    // Приоритет тегов для даты создания
-    let date_tags = [
-        TrackInfoTag::CreateDate, // Стандартная дата/время
-    ];
+    let date_tags = [TrackInfoTag::CreateDate];
 
     let mut result_date = None;
     for &tag in &date_tags {
@@ -626,7 +507,7 @@ fn parse_track<T: std::io::Read + std::io::Seek>(
     result_date
 }
 
-// Функция для проверки валидности даты в формате YYYY-MM-DD
+/// Validates a date string in YYYY-MM-DD format.
 fn is_valid_date(date_str: &str) -> bool {
     if date_str.len() != 10 {
         return false;
@@ -645,11 +526,10 @@ fn is_valid_date(date_str: &str) -> bool {
         return false;
     }
 
-    // Проверяем валидность даты через библиотеку chrono
     NaiveDate::from_ymd_opt(year, month, day).is_some()
 }
 
-// Функция для проверки и преобразования формата YYYYMMDD в YYYY-MM-DD
+/// Attempts to parse YYYYMMDD format to YYYY-MM-DD.
 fn try_parse_yyyymmdd(date_str: &str) -> Option<String> {
     if date_str.len() != 8 {
         return None;
@@ -670,13 +550,12 @@ fn try_parse_yyyymmdd(date_str: &str) -> Option<String> {
         return None;
     }
 
-    // Проверяем, что дата действительно валидна
     NaiveDate::from_ymd_opt(year_num, month_num, day_num)?;
 
     Some(format!("{}-{}-{}", year, month, day))
 }
 
-// Функция для проверки и преобразования формата YYYY_MMDD в YYYY-MM-DD
+/// Attempts to parse YYYY_MMDD format to YYYY-MM-DD.
 fn try_parse_yyyy_mmdd(year: &str, mmdd: &str) -> Option<String> {
     if mmdd.len() != 4 {
         return None;
@@ -696,48 +575,7 @@ fn try_parse_yyyy_mmdd(year: &str, mmdd: &str) -> Option<String> {
         return None;
     }
 
-    // Проверяем, что дата действительно валидна
     NaiveDate::from_ymd_opt(year_num, month_num, day_num)?;
 
     Some(format!("{}-{}-{}", year, month, day))
-}
-
-fn urational_to_f64(rational: &URational) -> f64 {
-    rational.0 as f64 / rational.1 as f64
-}
-
-fn latlng_to_decimal_degrees(latlng: &LatLng) -> f64 {
-    let degrees = urational_to_f64(&latlng.0);
-    let minutes = urational_to_f64(&latlng.1);
-    let seconds = urational_to_f64(&latlng.2);
-
-    degrees
-        + minutes / 60.0
-        + if seconds > 1.0 {
-            seconds / 3600.0
-        } else {
-            seconds / 60.0
-        }
-}
-
-fn gps_to_decimal_point(gps: &GPSInfo) -> Point<f64> {
-    let mut lat = latlng_to_decimal_degrees(&gps.latitude);
-    let mut lon = latlng_to_decimal_degrees(&gps.longitude);
-
-    // Apply hemisphere references
-    if gps.latitude_ref == 'S' {
-        lat = -lat;
-    }
-    if gps.longitude_ref == 'W' {
-        lon = -lon;
-    }
-
-    Point::new(lon, lat) // geo crate uses (longitude, latitude) order
-}
-
-fn calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64)) -> f64 {
-    let gps_point = gps_to_decimal_point(gps);
-    let target = Point::new(target_coords.1, target_coords.0); // (lon, lat)
-
-    Geodesic.distance(gps_point, target)
 }

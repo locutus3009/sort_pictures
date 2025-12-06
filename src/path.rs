@@ -1,18 +1,18 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Finds the common base path between two PathBuf instances and calculates
+/// Finds the common base path between two Path instances and calculates
 /// the relative paths from the base to each original path.
 ///
 /// # Arguments
-/// * `source` - The source PathBuf (must be canonical)
-/// * `target` - The target PathBuf (must be canonical)
+/// * `source` - The source Path (must be canonical)
+/// * `target` - The target Path (must be canonical)
 ///
 /// # Returns
 /// A tuple containing:
 /// * `base` - The common base path
 /// * `rel_source` - The relative path from base to source
 /// * `rel_target` - The relative path from base to target
-pub(crate) fn find_common_base(source: &PathBuf, target: &PathBuf) -> (PathBuf, PathBuf, PathBuf) {
+pub(crate) fn find_common_base(source: &Path, target: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let source_components: Vec<_> = source.components().collect();
     let target_components: Vec<_> = target.components().collect();
 
