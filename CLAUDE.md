@@ -37,8 +37,11 @@ sort_pictures/
 ├── LICENSE.txt                   # Project license
 ├── install.sh                    # Systemd service installation script
 ├── src/
-│   ├── main.rs                   # Entry point, file processing logic, daemon mode
+│   ├── main.rs                   # Entry point, orchestration logic
 │   ├── config.rs                 # Configuration structs, CLI args, config loading
+│   ├── daemon.rs                 # Daemon mode, file watching, thread management
+│   ├── date.rs                   # Date extraction from EXIF, tracks, and filenames
+│   ├── files.rs                  # File operations, path building, collision handling
 │   ├── gps.rs                    # GPS coordinate extraction and distance calculations
 │   └── path.rs                   # Path utilities (find_common_base)
 └── systemd/
@@ -50,8 +53,11 @@ sort_pictures/
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/main.rs` | ~581 | Entry point, file processing orchestration, date extraction, daemon mode |
+| `src/main.rs` | ~220 | Entry point, orchestration, wires modules together |
 | `src/config.rs` | ~152 | Configuration structs (`Config`, `Dir`, `Place`), CLI parsing, config file loading |
+| `src/daemon.rs` | ~165 | File watching with `notify`, thread spawning per directory, event handling |
+| `src/date.rs` | ~510 | EXIF/track date extraction, filename regex patterns, date validation |
+| `src/files.rs` | ~450 | Directory scanning, file filtering, target path building, collision handling |
 | `src/gps.rs` | ~180 | GPS coordinate conversion, geodesic distance calculation, place matching |
 | `src/path.rs` | ~163 | Single utility function `find_common_base()` for clean log output formatting |
 
@@ -253,32 +259,45 @@ CLI arguments override config file values when explicitly provided.
 ### 5.1 Module Dependency Graph
 
 ```
-main.rs
+main.rs (orchestration)
     │
     ├── config.rs (Config, Dir, Place, load_config)
     │   ├── clap (CLI argument parsing)
     │   ├── serde/toml (config file deserialization)
     │   └── dirs (config path resolution)
     │
+    ├── date.rs (date extraction and validation)
+    │   ├── nom-exif (EXIF/Track parsing)
+    │   ├── regex (filename patterns, compiled once via OnceLock)
+    │   └── chrono (date validation)
+    │
+    ├── files.rs (file operations)
+    │   ├── std::fs (read_dir, rename, create_dir_all)
+    │   ├── date.rs (decade_folder for path building)
+    │   └── path.rs (find_common_base for logging)
+    │
+    ├── daemon.rs (daemon mode)
+    │   ├── notify (file watching)
+    │   ├── std::thread/mpsc (threading)
+    │   ├── config.rs (Dir struct)
+    │   └── files.rs (should_skip_file)
+    │
     ├── gps.rs (GPS processing)
     │   ├── geo (geodesic distance calculations)
     │   ├── nom-exif (GPSInfo, LatLng, URational types)
     │   └── config.rs (Place struct for matching)
     │
-    ├── path.rs
-    │   └── find_common_base() (logging utility)
-    │
-    ├── Date Extraction (in main.rs)
-    │   ├── nom-exif (EXIF/Track parsing)
-    │   ├── regex (filename patterns)
-    │   └── chrono (date validation)
-    │
-    ├── File Operations (in main.rs)
-    │   └── std::fs (read_dir, rename, create_dir_all)
-    │
-    └── Daemon Mode (in main.rs)
-        ├── notify (file watching)
-        └── std::thread/mpsc (threading)
+    └── path.rs (no internal dependencies)
+        └── find_common_base() (logging utility)
+```
+
+**Module hierarchy** (lower modules have no dependencies on higher ones):
+```
+Level 0: config.rs, path.rs (no internal deps)
+Level 1: date.rs, gps.rs (depend on config)
+Level 2: files.rs (depends on date, path)
+Level 3: daemon.rs (depends on config, files)
+Level 4: main.rs (depends on all modules)
 ```
 
 ### 5.2 Core Data Structures
@@ -316,94 +335,143 @@ pub struct Place {
 }
 ```
 
-### 5.3 Key Functions and Their Contracts
-
-#### `main()` → `Result<(), Box<dyn Error>>`
-**Location**: `src/main.rs:297`
-
-- **Purpose**: Entry point; loads config, processes existing files, optionally starts daemon
-- **Side effects**:
-  - Reads config file (via `config::load_config()`)
-  - Processes and moves files in configured directories
-  - Spawns watcher threads if `--daemonize`
-- **Thread safety**: Uses `Mutex<Config>` for global config access
-
-#### `process_fname()` → `Result<(), Box<dyn Error>>`
-**Location**: `src/main.rs:41`
+**Location**: `src/date.rs`
 
 ```rust
-fn process_fname(
-    nodecade: bool,
-    noyear: bool,
-    nomonth: bool,
-    fname: PathBuf,           // File or directory to process
-    target_dir: &Option<PathBuf>,
-    places: &[Place],
-) -> Result<(), Box<dyn Error>>
+/// Result of date extraction from a file
+pub struct ExtractedDate {
+    pub date: String,               // Date string in YYYY-MM-DD format
+    pub source: DateSource,         // Where the date came from
+    pub gps: Option<GPSInfo>,       // GPS info extracted along with date
+}
+
+/// Where the date was extracted from
+pub enum DateSource {
+    ExifDateTimeOriginal,           // EXIF DateTimeOriginal tag
+    ExifCreateDate,                 // EXIF CreateDate tag
+    ExifModifyDate,                 // EXIF ModifyDate tag
+    TrackMetadata,                  // Video track metadata
+    FilenamePattern,                // Extracted from filename
+}
 ```
 
-- **Purpose**: Core processing logic for a file or directory
-- **Input**: Can accept a single file path OR a directory path
-- **Behavior**:
-  - If directory: iterates over all files in it
-  - If file: processes only that file
-  - Extracts date via EXIF → Track → filename patterns
-  - Checks GPS against configured places
-  - Moves file to appropriate target with hierarchy
-- **Side effects**: Creates directories, moves files
-- **Error handling**: Returns error on I/O failures, regex failures
+**Location**: `src/files.rs`
 
-#### `parse_exif()` → `Option<(String, Option<GPSInfo>)>`
-**Location**: `src/main.rs:439`
+```rust
+/// Reasons why a file might be skipped
+pub enum SkipReason {
+    IsDirectory,                    // Path is a directory
+    HiddenFile,                     // File starts with '.'
+    SkippedExtension(String),       // Extension is .sh or .rs
+}
+```
 
-- **Purpose**: Extract date and GPS from EXIF metadata
-- **Returns**: `Some((date_string, gps_info))` or `None` if parsing fails
-- **Date format returned**: `"YYYY-MM-DD"`
-- **Tags checked**: `DateTimeOriginal`, `CreateDate`, `ModifyDate` (in priority order)
-- **EntryValue handling**: Supports `Time`, `NaiveDateTime`, and `as_time()` fallback
-- **GPS handling**: Uses `.ok().flatten()` for robust GPS extraction (won't panic on missing GPS)
+**Location**: `src/daemon.rs`
 
-#### `parse_track()` → `Option<(String, Option<GPSInfo>)>`
-**Location**: `src/main.rs:482`
+```rust
+/// Configuration for daemon behavior
+pub struct DaemonConfig {
+    pub log_skipped: bool,          // Log when files are skipped
+}
 
-- **Purpose**: Extract date and GPS from video track metadata
-- **Returns**: `Some((date_string, gps_info))` or `None`
-- **Tags checked**: `CreateDate`
+/// Handle for controlling a directory watcher thread
+pub struct WatchHandle {
+    thread: JoinHandle<()>,         // Thread join handle
+    path: PathBuf,                  // Path being watched
+}
+```
 
-#### `is_valid_date(date_str: &str)` → `bool`
-**Location**: `src/main.rs:512`
+### 5.3 Key Functions and Their Contracts
 
-- **Purpose**: Validate date string format and values
-- **Input format**: `"YYYY-MM-DD"` (exactly 10 characters)
-- **Validation**: Year 1990-2099, month 1-12, day 1-31, chrono validation for actual date validity
+#### Main Orchestration (`src/main.rs`)
 
-#### `calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64))` → `f64`
-**Location**: `src/gps.rs:91`
+**`main()`** → `Result<(), Box<dyn Error>>`
+- **Location**: `src/main.rs:24`
+- **Purpose**: Entry point; loads config, processes existing files, optionally starts daemon
+- **Side effects**: Reads config file, processes files, spawns watcher threads
 
-- **Purpose**: Calculate geodesic distance between GPS point and target coordinates
-- **Returns**: Distance in **meters**
-- **Note**: Caller divides by 1000 to compare against radius (in km)
+**`process_file()`** → `Result<(), Box<dyn Error>>`
+- **Location**: `src/main.rs:137`
+- **Purpose**: Process a single file - extract date, check GPS, move to target
+- **Behavior**: Extracts date, determines target via GPS or default, builds path, moves file
 
-#### `find_matching_place(gps: &GPSInfo, places: &[Place])` → `Option<PlaceMatch>`
-**Location**: `src/gps.rs:131`
+**`determine_target()`** → `Result<(PathBuf, bool, bool, bool), Box<dyn Error>>`
+- **Location**: `src/main.rs:176`
+- **Purpose**: Determine target directory and hierarchy settings for a file
+- **Returns**: `(target_path, nodecade, noyear, nomonth)`
 
-- **Purpose**: Find the first configured place matching the GPS coordinates
-- **Returns**: `Some(PlaceMatch)` with the matched place and distance, or `None`
-- **Note**: First matching place in config order wins
+#### Date Extraction (`src/date.rs`)
 
-#### `find_common_base(source: &Path, target: &Path)` → `(PathBuf, PathBuf, PathBuf)`
-**Location**: `src/path.rs:15`
+**`extract_date(path: &Path)`** → `Option<ExtractedDate>`
+- **Location**: `src/date.rs:77`
+- **Purpose**: Extract date from file using all methods (EXIF → Track → Filename)
+- **Returns**: `ExtractedDate` with date string, source, and optional GPS
 
+**`extract_date_from_filename(filename: &str)`** → `Option<ExtractedDate>`
+- **Location**: `src/date.rs:196`
+- **Purpose**: Extract date from filename using regex patterns
+- **Patterns checked**: ISO prefix, ISO embedded, YYYY_MMDD, YYYYMMDD
+
+**`is_valid_date(year, month, day)`** → `bool`
+- **Location**: `src/date.rs:280`
+- **Purpose**: Validate date components are within range (1990-2099)
+
+**`decade_folder(year)`** → `String`
+- **Location**: `src/date.rs:358`
+- **Purpose**: Calculate decade folder name (e.g., "2020-2029")
+
+#### File Operations (`src/files.rs`)
+
+**`should_skip_file(path: &Path)`** → `Option<SkipReason>`
+- **Location**: `src/files.rs:53`
+- **Purpose**: Check if file should be skipped (directory, hidden, .sh/.rs)
+
+**`scan_directory(dir: &Path)`** → `io::Result<Vec<PathBuf>>`
+- **Location**: `src/files.rs:84`
+- **Purpose**: Get all processable files from a directory
+
+**`build_target_path(base, date, nodecade, noyear, nomonth)`** → `PathBuf`
+- **Location**: `src/files.rs:106`
+- **Purpose**: Build target path with date hierarchy
+
+**`move_file_safe(source, target_dir, filename)`** → `io::Result<PathBuf>`
+- **Location**: `src/files.rs:194`
+- **Purpose**: Move file with collision handling (-N suffix)
+
+**`resolve_collision(target_dir, filename)`** → `String`
+- **Location**: `src/files.rs:158`
+- **Purpose**: Generate unique filename if collision exists
+
+#### Daemon Mode (`src/daemon.rs`)
+
+**`run_daemon(dirs, processor_factory, config)`**
+- **Location**: `src/daemon.rs:126`
+- **Purpose**: Run daemon with file watching for all directories
+- **Behavior**: Spawns watcher thread per directory, blocks until interrupted
+
+**`watch_directory(dir, processor, config)`** → `WatchHandle`
+- **Location**: `src/daemon.rs:60`
+- **Purpose**: Watch a single directory for new files
+
+#### GPS Processing (`src/gps.rs`)
+
+**`calculate_distance(gps, target_coords)`** → `f64`
+- **Location**: `src/gps.rs:95`
+- **Purpose**: Calculate geodesic distance in meters
+
+**`find_matching_place(gps, places)`** → `Option<PlaceMatch>`
+- **Location**: `src/gps.rs:137`
+- **Purpose**: Find first place matching GPS coordinates
+
+#### Utilities
+
+**`find_common_base(source, target)`** → `(PathBuf, PathBuf, PathBuf)`
+- **Location**: `src/path.rs:15`
 - **Purpose**: Find common base path for clean log output
-- **Returns**: `(base_path, relative_source, relative_target)`
-- **Example**: `/home/user/a/file.txt` + `/home/user/b/photo.jpg` → `(/home/user, a/file.txt, b/photo.jpg)`
 
-#### `load_config()` → `Result<Config, Box<dyn Error>>`
-**Location**: `src/config.rs:104`
-
-- **Purpose**: Load configuration from CLI arguments and config file
-- **Returns**: Merged configuration with CLI args taking precedence
-- **Default config path**: `~/.config/sort_pictures/config.toml`
+**`load_config()`** → `Result<Config, Box<dyn Error>>`
+- **Location**: `src/config.rs:118`
+- **Purpose**: Load configuration from CLI and config file
 
 ### 5.4 Processing Pipeline
 
@@ -468,9 +536,11 @@ fn process_fname(
 
 Date is determined using a priority-based approach. The first successful extraction wins.
 
+**Module**: `src/date.rs`
+
 ### Priority 1: EXIF Metadata (Images)
 
-**Handled by**: `parse_exif()` at `src/main.rs:439`
+**Handled by**: `extract_date_from_exif_with_parser()` at `src/date.rs:108`
 
 | Tag Priority | EXIF Tag | Description |
 |--------------|----------|-------------|
@@ -487,7 +557,7 @@ Date is determined using a priority-based approach. The first successful extract
 
 ### Priority 2: Track Metadata (Videos)
 
-**Handled by**: `parse_track()` at `src/main.rs:482`
+**Handled by**: `extract_date_from_track_with_parser()` at `src/date.rs:156`
 
 | Tag | Description |
 |-----|-------------|
@@ -495,26 +565,30 @@ Date is determined using a priority-based approach. The first successful extract
 
 ### Priority 3: Filename Patterns
 
+**Handled by**: `extract_date_from_filename()` at `src/date.rs:196`
+
 Checked in the following order (first match wins):
 
 | Priority | Pattern Name | Regex | Example Filename | Extracted Date |
 |----------|--------------|-------|------------------|----------------|
 | 1 | ISO prefix | `^(\d{4}[-_]\d{2}[-_]\d{2})` | `2024-03-15_photo.jpg` | 2024-03-15 |
-| 2 | ISO embedded | `[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})` | `IMG-2024-03-15-WA001.jpg` | 2024-03-15 |
+| 2 | ISO embedded | `[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})` | `IMG_2024-03-15_photo.jpg` | 2024-03-15 |
 | 3 | YYYY_MMDD | `(\d{4})_(\d{4})` | `2020_0718_064509.MP4` | 2020-07-18 |
 | 4 | YYYYMMDD | `(\d{8})` | `IMG_20240315_120000.jpg` | 2024-03-15 |
 
-**Regex definitions** (`src/main.rs:49-53`):
+**Note**: The ISO embedded pattern requires a non-digit, non-hyphen character before the date (e.g., underscore or letter).
+
+**Regex definitions** (`src/date.rs:44-60`, compiled once via `OnceLock`):
 ```rust
-let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})")?;
-let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})")?;
-let yyyymmdd_regex = Regex::new(r"(\d{8})")?;
-let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
+static YYYY_MM_DD_PREFIX: OnceLock<Regex> = OnceLock::new();
+static YYYY_MM_DD_EMBEDDED: OnceLock<Regex> = OnceLock::new();
+static YYYYMMDD: OnceLock<Regex> = OnceLock::new();
+static YYYY_MMDD: OnceLock<Regex> = OnceLock::new();
 ```
 
 ### Validation Rules
 
-**Location**: `is_valid_date()` at `src/main.rs:512`, `try_parse_yyyymmdd()` at `src/main.rs:534`, `try_parse_yyyy_mmdd()` at `src/main.rs:560`
+**Location**: `is_valid_date()` at `src/date.rs:280`, `try_parse_yyyymmdd()` at `src/date.rs:305`, `try_parse_yyyy_mmdd()` at `src/date.rs:334`
 
 | Field | Valid Range | Notes |
 |-------|-------------|-------|
@@ -642,10 +716,42 @@ Files that fail to process (no date extracted, I/O error) are:
 
 ### 9.1 Test Organization
 
-Tests are located in module-specific `#[cfg(test)]` blocks:
+Tests are located in module-specific `#[cfg(test)]` blocks. Total: **50 tests**
 
 ```
-src/path.rs
+src/date.rs (18 tests)
+└── mod tests
+    ├── test_is_valid_date_valid, test_is_valid_date_invalid_year/month/day
+    ├── test_is_valid_date_leap_year
+    ├── test_is_valid_date_str_valid, test_is_valid_date_str_invalid_format
+    ├── test_try_parse_yyyymmdd_valid/invalid
+    ├── test_try_parse_yyyy_mmdd_valid/invalid
+    ├── test_extract_date_from_filename_* (prefix, underscore, embedded, yyyymmdd, yyyy_mmdd, no_match)
+    ├── test_decade_folder, test_month_folder
+    └── test_format_date
+
+src/files.rs (13 tests)
+└── mod tests
+    ├── test_should_skip_hidden_file, test_should_skip_script_files, test_should_not_skip_normal_files
+    ├── test_build_target_path_* (full_hierarchy, no_decade, no_year, no_month, no_hierarchy)
+    ├── test_resolve_collision_* (no_conflict, single, multiple, no_extension)
+    ├── test_scan_directory_filters_correctly
+    └── test_move_file_quiet_* (creates_dirs, handles_collision)
+
+src/daemon.rs (5 tests)
+└── mod tests
+    ├── test_should_process_event_create_file
+    ├── test_should_process_event_rename_to
+    ├── test_should_process_event_other_events
+    └── test_daemon_config_default
+
+src/gps.rs (3 tests)
+└── mod tests
+    ├── test_gps_coordinates_new
+    ├── test_distance_km_same_point
+    └── test_distance_km_different_points
+
+src/path.rs (8 tests + 2 Windows-only)
 └── mod tests
     ├── test_common_parent_directory
     ├── test_one_is_prefix_of_other
@@ -657,69 +763,76 @@ src/path.rs
     ├── test_deep_nesting
     ├── test_different_drives_windows  (#[cfg(windows)])
     └── test_same_drive_windows        (#[cfg(windows)])
-
-src/gps.rs
-└── mod tests
-    ├── test_gps_coordinates_new
-    ├── test_distance_km_same_point
-    └── test_distance_km_different_points
 ```
 
 ### 9.2 Running Specific Tests
 
 ```bash
-# Run all tests
+# Run all tests (50 tests)
 cargo test
 
-# Run all path module tests
+# Run tests in a specific module
+cargo test date::tests
+cargo test files::tests
+cargo test daemon::tests
+cargo test gps::tests
 cargo test path::tests
 
-# Run all GPS module tests
-cargo test gps::tests
-
 # Run a specific test
-cargo test test_common_parent_directory
+cargo test test_extract_date_from_filename_prefix
 
 # Run with output visible
-cargo test test_common_parent_directory -- --nocapture
+cargo test test_build_target_path_full_hierarchy -- --nocapture
 
 # Run all tests matching a pattern
-cargo test common
+cargo test collision
 ```
 
 ### 9.3 Test Coverage
 
-Currently tested:
-- Path utility functions (`find_common_base`)
-- Various path relationship scenarios
-- Cross-platform path handling (Windows conditional tests)
-- GPS coordinate creation and distance calculations
-
-**Not currently tested** (potential areas for expansion):
-- Date extraction from filenames
-- EXIF parsing (would require test fixtures)
-- Config file parsing
+**Comprehensive coverage**:
+- Date extraction from filenames (all patterns)
+- Date validation (valid/invalid cases, leap years)
+- File filtering logic (hidden, extensions)
+- Target path building (all hierarchy combinations)
 - File collision handling
+- Directory scanning
+- Event filtering in daemon mode
+- GPS coordinate handling
+- Path utilities
+
+**Not currently tested** (would require test fixtures):
+- EXIF parsing from actual image files
+- Video track metadata parsing
+- Config file loading (integration test)
 
 ### 9.4 Writing New Tests
 
-**For filename date extraction:**
+Tests use temporary directories with atomic counters for isolation:
+
 ```rust
 #[cfg(test)]
-mod date_tests {
+mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    #[test]
-    fn test_yyyymmdd_extraction() {
-        assert_eq!(
-            try_parse_yyyymmdd("20240315"),
-            Some("2024-03-15".to_string())
-        );
+    static TEST_COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    fn temp_dir() -> PathBuf {
+        let id = TEST_COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "sort_pictures_test_{}_{}",
+            std::process::id(),
+            id
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
     #[test]
-    fn test_invalid_date() {
-        assert_eq!(try_parse_yyyymmdd("20241315"), None); // Invalid month
+    fn test_new_feature() {
+        let temp = temp_dir();
+        // Test code here...
     }
 }
 ```
@@ -730,17 +843,22 @@ mod date_tests {
 
 ### How File Watching Works
 
-**Location**: `src/main.rs:354-435`
+**Module**: `src/daemon.rs`
 
-1. For each configured directory, spawns a dedicated thread
+1. For each configured directory, `watch_directory()` spawns a dedicated thread
 2. Each thread creates a `notify::recommended_watcher`
 3. Watcher monitors for `Create(File)` and `Modify(Name(RenameMode::To))` events
-4. Events trigger `process_fname()` for the affected file
+4. Events are filtered by `should_process_event()` before calling the processor
 
 ```rust
-// Events that trigger processing:
-EventKind::Create(CreateKind::File)
-EventKind::Modify(ModifyKind::Name(RenameMode::To))  // File renamed into directory
+// Events that trigger processing (src/daemon.rs:94-103):
+fn should_process_event(event: &Event) -> Option<&Path> {
+    match event.kind {
+        EventKind::Create(CreateKind::File) => event.paths.first().map(|p| p.as_path()),
+        EventKind::Modify(ModifyKind::Name(RenameMode::To)) => event.paths.first().map(|p| p.as_path()),
+        _ => None,
+    }
+}
 ```
 
 ### Thread Model
@@ -749,16 +867,26 @@ EventKind::Modify(ModifyKind::Name(RenameMode::To))  // File renamed into direct
 main thread
     │
     ├── Initial scan (sequential)
-    │   └── process_fname() for each dir
+    │   └── process_directory() for each dir
     │
-    └── Daemon mode
-        ├── Thread 1: watcher for dir[0]
-        ├── Thread 2: watcher for dir[1]
+    └── Daemon mode (daemon::run_daemon)
+        ├── Thread 1: watch_directory(dir[0], processor)
+        ├── Thread 2: watch_directory(dir[1], processor)
         └── ...
-        └── Thread N: watcher for dir[N-1]
+        └── Thread N: watch_directory(dir[N-1], processor)
 ```
 
-**Synchronization**: Global config in `Mutex<Config>` (read-only after init)
+**Processor pattern**: `main.rs` creates a closure for each directory that captures the configuration:
+```rust
+daemon::run_daemon(&dirs, |dir| {
+    let places = places.clone();
+    let target = dir.target.clone();
+    // ... capture other config
+    move |path: &Path| {
+        process_file(path, &target, nodecade, noyear, nomonth, &places)
+    }
+}, daemon::DaemonConfig::default());
+```
 
 ### Graceful Shutdown
 
@@ -766,7 +894,7 @@ main thread
 - SIGTERM/SIGINT (systemd stop)
 - Thread panic (unwrap failures)
 
-Threads are joined in `main()` but watchers run indefinitely.
+`WatchHandle::join()` is called for each watcher but they run indefinitely.
 
 ### Systemd Unit File
 
@@ -847,30 +975,42 @@ Logs go to systemd journal. Access via `journalctl --user -u sort_pictures`.
 
 ### 11.1 Adding a New Date Pattern
 
-**Files to modify**: `src/main.rs`
+**Files to modify**: `src/date.rs`
 
-1. **Add regex constant** (around line 49-53):
+1. **Add regex static** (in the static definitions section):
 ```rust
-let new_pattern_regex = Regex::new(r"your_pattern_here")?;
+static NEW_PATTERN: OnceLock<Regex> = OnceLock::new();
+
+fn new_pattern_regex() -> &'static Regex {
+    NEW_PATTERN.get_or_init(|| Regex::new(r"your_pattern_here").unwrap())
+}
 ```
 
-2. **Add extraction logic** (in `process_fname()`, after the existing date pattern checks):
+2. **Add extraction logic** in `extract_date_from_filename()`:
 ```rust
-if date_found.is_none()
-    && let Some(captures) = new_pattern_regex.captures(&filename) {
+// Pattern N: Description
+if let Some(captures) = new_pattern_regex().captures(filename) {
     // Extract year, month, day from captures
     // Call validation function
-    // Set date_found = Some(date_str)
+    // Return Some(ExtractedDate { ... })
 }
 ```
 
 3. **Add validation function** if needed (similar to `try_parse_yyyymmdd`).
 
-4. **Add test cases** for the new pattern.
+4. **Add test cases** in `src/date.rs` tests:
+```rust
+#[test]
+fn test_extract_date_from_filename_new_pattern() {
+    let result = extract_date_from_filename("example_filename.jpg");
+    assert!(result.is_some());
+    assert_eq!(result.unwrap().date, "2024-03-15");
+}
+```
 
 ### 11.2 Adding a New Configuration Option
 
-**Files to modify**: `src/config.rs`
+**Files to modify**: `src/config.rs`, then consuming modules
 
 1. **Add field to struct** (`Dir`, `Place`, or `Config`):
 ```rust
@@ -881,32 +1021,43 @@ pub struct Dir {
 }
 ```
 
-2. **Update processing logic** in `src/main.rs` to use the new option.
+2. **Update processing logic** - depending on the option:
+   - Date-related: Update `src/date.rs`
+   - File operations: Update `src/files.rs`
+   - Daemon behavior: Update `src/daemon.rs`
+   - Orchestration: Update `src/main.rs`
 
 3. **Update example config** in `systemd/config.toml`.
 
 4. **Update this CLAUDE.md** in the Configuration section.
 
-### 11.3 Adding GPS Matching Logic
+### 11.3 Adding File Filtering Logic
 
-**Files to modify**: `src/gps.rs`
+**Files to modify**: `src/files.rs`
 
-1. **Add new GPS-related function** in `src/gps.rs`:
+1. **Update `should_skip_file()`** to add new skip conditions:
 ```rust
-/// Your new GPS utility function
-pub fn new_gps_function(/* params */) -> ReturnType {
-    // Implementation
+pub fn should_skip_file(path: &Path) -> Option<SkipReason> {
+    // existing checks...
+
+    // New check
+    if some_condition(path) {
+        return Some(SkipReason::NewReason);
+    }
+
+    None
 }
 ```
 
-2. **Export from module** - ensure the function is `pub` if needed by other modules.
-
-3. **Import in main.rs** if used there:
+2. **Add `SkipReason` variant** if needed:
 ```rust
-use gps::new_gps_function;
+pub enum SkipReason {
+    // existing variants...
+    NewReason,
+}
 ```
 
-4. **Add test cases** in `src/gps.rs` under `#[cfg(test)] mod tests`.
+3. **Add tests** for the new filter.
 
 ### 11.4 Debugging File Processing Issues
 
@@ -917,11 +1068,11 @@ use gps::new_gps_function;
 cargo run -- --config your_config.toml
 ```
 
-2. **Add debug prints** in `process_fname()`:
+2. **Add debug prints** in `src/main.rs:process_file()`:
 ```rust
-println!("Processing: {:?}", filename);
-println!("EXIF date: {:?}", date_found);
-println!("GPS data: {:?}", gps_data);
+println!("Processing: {:?}", file_path);
+let extracted = date::extract_date(file_path);
+println!("Extracted date: {:?}", extracted);
 ```
 
 3. **Check file manually** for EXIF data:
@@ -929,10 +1080,15 @@ println!("GPS data: {:?}", gps_data);
 exiftool your_file.jpg
 ```
 
-4. **Verify filename pattern match**:
-```bash
-# Test regex in Rust playground or add a test
+4. **Test date extraction directly**:
+```rust
+#[test]
+fn debug_specific_file() {
+    let result = extract_date_from_filename("your_filename.jpg");
+    println!("Result: {:?}", result);
+}
 ```
+Run with: `cargo test debug_specific_file -- --nocapture`
 
 ---
 
