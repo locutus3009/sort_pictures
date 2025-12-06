@@ -37,7 +37,9 @@ sort_pictures/
 ├── LICENSE.txt                   # Project license
 ├── install.sh                    # Systemd service installation script
 ├── src/
-│   ├── main.rs                   # Entry point, CLI, config, processing logic, daemon
+│   ├── main.rs                   # Entry point, file processing logic, daemon mode
+│   ├── config.rs                 # Configuration structs, CLI args, config loading
+│   ├── gps.rs                    # GPS coordinate extraction and distance calculations
 │   └── path.rs                   # Path utilities (find_common_base)
 └── systemd/
     ├── config.toml               # Example configuration file
@@ -48,7 +50,9 @@ sort_pictures/
 
 | File | Lines | Purpose |
 |------|-------|---------|
-| `src/main.rs` | ~743 | All application logic: CLI parsing, config loading, date extraction, GPS matching, file processing, daemon mode |
+| `src/main.rs` | ~581 | Entry point, file processing orchestration, date extraction, daemon mode |
+| `src/config.rs` | ~152 | Configuration structs (`Config`, `Dir`, `Place`), CLI parsing, config file loading |
+| `src/gps.rs` | ~180 | GPS coordinate conversion, geodesic distance calculation, place matching |
 | `src/path.rs` | ~163 | Single utility function `find_common_base()` for clean log output formatting |
 
 ---
@@ -251,78 +255,81 @@ CLI arguments override config file values when explicitly provided.
 ```
 main.rs
     │
-    ├── Config (CLI + file parsing)
-    │   ├── clap (CLI)
-    │   ├── serde/toml (config file)
+    ├── config.rs (Config, Dir, Place, load_config)
+    │   ├── clap (CLI argument parsing)
+    │   ├── serde/toml (config file deserialization)
     │   └── dirs (config path resolution)
     │
-    ├── Date Extraction
+    ├── gps.rs (GPS processing)
+    │   ├── geo (geodesic distance calculations)
+    │   ├── nom-exif (GPSInfo, LatLng, URational types)
+    │   └── config.rs (Place struct for matching)
+    │
+    ├── path.rs
+    │   └── find_common_base() (logging utility)
+    │
+    ├── Date Extraction (in main.rs)
     │   ├── nom-exif (EXIF/Track parsing)
     │   ├── regex (filename patterns)
     │   └── chrono (date validation)
     │
-    ├── GPS Processing
-    │   ├── nom-exif (GPSInfo extraction)
-    │   └── geo (geodesic distance)
-    │
-    ├── File Operations
+    ├── File Operations (in main.rs)
     │   └── std::fs (read_dir, rename, create_dir_all)
     │
-    ├── Daemon Mode
-    │   ├── notify (file watching)
-    │   └── std::thread/mpsc (threading)
-    │
-    └── path.rs
-        └── find_common_base() (logging utility)
+    └── Daemon Mode (in main.rs)
+        ├── notify (file watching)
+        └── std::thread/mpsc (threading)
 ```
 
 ### 5.2 Core Data Structures
 
+**Location**: `src/config.rs`
+
 ```rust
 /// Configuration loaded from CLI args and config file
-struct Config {
-    config: Option<PathBuf>,    // Config file path (CLI only, not serialized)
-    daemonize: bool,            // Run as daemon (CLI only)
-    dirs: Vec<Dir>,             // Directory configurations
-    places: Vec<Place>,         // GPS-based place configurations
+pub struct Config {
+    pub config: Option<PathBuf>,    // Config file path (CLI only, not serialized)
+    pub daemonize: bool,            // Run as daemon (CLI only)
+    pub dirs: Vec<Dir>,             // Directory configurations
+    pub places: Vec<Place>,         // GPS-based place configurations
 }
 
 /// Directory monitoring configuration
-struct Dir {
-    source: Option<PathBuf>,    // Source directory to monitor
-    target: Option<PathBuf>,    // Target directory (defaults to source)
-    nodecade: bool,             // Disable decade folder creation
-    noyear: bool,               // Disable year folder creation
-    nomonth: bool,              // Disable month folder creation
+pub struct Dir {
+    pub source: Option<PathBuf>,    // Source directory to monitor
+    pub target: Option<PathBuf>,    // Target directory (defaults to source)
+    pub nodecade: bool,             // Disable decade folder creation
+    pub noyear: bool,               // Disable year folder creation
+    pub nomonth: bool,              // Disable month folder creation
 }
 
 /// GPS-based routing configuration
-struct Place {
-    name: String,               // Human-readable place name
-    target: Option<PathBuf>,    // Target directory for matching photos
-    lat: f64,                   // Latitude in decimal degrees
-    lon: f64,                   // Longitude in decimal degrees
-    radius: f64,                // Matching radius in kilometers
-    nodecade: bool,             // Disable decade folder creation
-    noyear: bool,               // Disable year folder creation
-    nomonth: bool,              // Disable month folder creation
+pub struct Place {
+    pub name: String,               // Human-readable place name
+    pub target: Option<PathBuf>,    // Target directory for matching photos
+    pub lat: f64,                   // Latitude in decimal degrees
+    pub lon: f64,                   // Longitude in decimal degrees
+    pub radius: f64,                // Matching radius in kilometers
+    pub nodecade: bool,             // Disable decade folder creation
+    pub noyear: bool,               // Disable year folder creation
+    pub nomonth: bool,              // Disable month folder creation
 }
 ```
 
 ### 5.3 Key Functions and Their Contracts
 
 #### `main()` → `Result<(), Box<dyn Error>>`
-**Location**: `src/main.rs:410`
+**Location**: `src/main.rs:297`
 
 - **Purpose**: Entry point; loads config, processes existing files, optionally starts daemon
 - **Side effects**:
-  - Reads config file
+  - Reads config file (via `config::load_config()`)
   - Processes and moves files in configured directories
   - Spawns watcher threads if `--daemonize`
 - **Thread safety**: Uses `Mutex<Config>` for global config access
 
 #### `process_fname()` → `Result<(), Box<dyn Error>>`
-**Location**: `src/main.rs:104`
+**Location**: `src/main.rs:41`
 
 ```rust
 fn process_fname(
@@ -331,7 +338,7 @@ fn process_fname(
     nomonth: bool,
     fname: PathBuf,           // File or directory to process
     target_dir: &Option<PathBuf>,
-    places: &Vec<Place>,
+    places: &[Place],
 ) -> Result<(), Box<dyn Error>>
 ```
 
@@ -347,7 +354,7 @@ fn process_fname(
 - **Error handling**: Returns error on I/O failures, regex failures
 
 #### `parse_exif()` → `Option<(String, Option<GPSInfo>)>`
-**Location**: `src/main.rs:562`
+**Location**: `src/main.rs:439`
 
 - **Purpose**: Extract date and GPS from EXIF metadata
 - **Returns**: `Some((date_string, gps_info))` or `None` if parsing fails
@@ -357,32 +364,46 @@ fn process_fname(
 - **GPS handling**: Uses `.ok().flatten()` for robust GPS extraction (won't panic on missing GPS)
 
 #### `parse_track()` → `Option<(String, Option<GPSInfo>)>`
-**Location**: `src/main.rs:596`
+**Location**: `src/main.rs:482`
 
 - **Purpose**: Extract date and GPS from video track metadata
 - **Returns**: `Some((date_string, gps_info))` or `None`
 - **Tags checked**: `CreateDate`
 
 #### `is_valid_date(date_str: &str)` → `bool`
-**Location**: `src/main.rs:629`
+**Location**: `src/main.rs:512`
 
 - **Purpose**: Validate date string format and values
 - **Input format**: `"YYYY-MM-DD"` (exactly 10 characters)
 - **Validation**: Year 1990-2099, month 1-12, day 1-31, chrono validation for actual date validity
 
 #### `calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64))` → `f64`
-**Location**: `src/main.rs:737`
+**Location**: `src/gps.rs:91`
 
 - **Purpose**: Calculate geodesic distance between GPS point and target coordinates
 - **Returns**: Distance in **meters**
 - **Note**: Caller divides by 1000 to compare against radius (in km)
 
-#### `find_common_base(source: &PathBuf, target: &PathBuf)` → `(PathBuf, PathBuf, PathBuf)`
+#### `find_matching_place(gps: &GPSInfo, places: &[Place])` → `Option<PlaceMatch>`
+**Location**: `src/gps.rs:131`
+
+- **Purpose**: Find the first configured place matching the GPS coordinates
+- **Returns**: `Some(PlaceMatch)` with the matched place and distance, or `None`
+- **Note**: First matching place in config order wins
+
+#### `find_common_base(source: &Path, target: &Path)` → `(PathBuf, PathBuf, PathBuf)`
 **Location**: `src/path.rs:15`
 
 - **Purpose**: Find common base path for clean log output
 - **Returns**: `(base_path, relative_source, relative_target)`
 - **Example**: `/home/user/a/file.txt` + `/home/user/b/photo.jpg` → `(/home/user, a/file.txt, b/photo.jpg)`
+
+#### `load_config()` → `Result<Config, Box<dyn Error>>`
+**Location**: `src/config.rs:104`
+
+- **Purpose**: Load configuration from CLI arguments and config file
+- **Returns**: Merged configuration with CLI args taking precedence
+- **Default config path**: `~/.config/sort_pictures/config.toml`
 
 ### 5.4 Processing Pipeline
 
@@ -449,7 +470,7 @@ Date is determined using a priority-based approach. The first successful extract
 
 ### Priority 1: EXIF Metadata (Images)
 
-**Handled by**: `parse_exif()` at `src/main.rs:562`
+**Handled by**: `parse_exif()` at `src/main.rs:439`
 
 | Tag Priority | EXIF Tag | Description |
 |--------------|----------|-------------|
@@ -466,7 +487,7 @@ Date is determined using a priority-based approach. The first successful extract
 
 ### Priority 2: Track Metadata (Videos)
 
-**Handled by**: `parse_track()` at `src/main.rs:596`
+**Handled by**: `parse_track()` at `src/main.rs:482`
 
 | Tag | Description |
 |-----|-------------|
@@ -483,7 +504,7 @@ Checked in the following order (first match wins):
 | 3 | YYYY_MMDD | `(\d{4})_(\d{4})` | `2020_0718_064509.MP4` | 2020-07-18 |
 | 4 | YYYYMMDD | `(\d{8})` | `IMG_20240315_120000.jpg` | 2024-03-15 |
 
-**Regex definitions** (`src/main.rs:113-116`):
+**Regex definitions** (`src/main.rs:49-53`):
 ```rust
 let yyyy_mm_dd_prefix_regex = Regex::new(r"^(\d{4}[-_]\d{2}[-_]\d{2})")?;
 let yyyy_mm_dd_embedded_regex = Regex::new(r"[^0-9-](\d{4}[-_]\d{2}[-_]\d{2})")?;
@@ -493,7 +514,7 @@ let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
 
 ### Validation Rules
 
-**Location**: `is_valid_date()` at `src/main.rs:629`, `try_parse_yyyymmdd()` at `src/main.rs:652`, `try_parse_yyyy_mmdd()` at `src/main.rs:679`
+**Location**: `is_valid_date()` at `src/main.rs:512`, `try_parse_yyyymmdd()` at `src/main.rs:534`, `try_parse_yyyy_mmdd()` at `src/main.rs:560`
 
 | Field | Valid Range | Notes |
 |-------|-------------|-------|
@@ -527,11 +548,11 @@ let yyyy_mmdd_regex = Regex::new(r"(\d{4})_(\d{4})")?;
 
 **Method**: Geodesic (great-circle) distance using Vincenty's formula via `geo` crate
 
-**Location**: `calculate_distance()` at `src/main.rs:737`
+**Location**: `calculate_distance()` at `src/gps.rs:91`
 
 ```rust
-fn calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64)) -> f64 {
-    let gps_point = gps_to_decimal_point(gps);
+pub fn calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64)) -> f64 {
+    let gps_point = gps_to_point(gps);
     let target = Point::new(target_coords.1, target_coords.0); // (lon, lat)
     Geodesic.distance(gps_point, target)  // Returns meters
 }
@@ -541,7 +562,7 @@ fn calculate_distance(gps: &GPSInfo, target_coords: &(f64, f64)) -> f64 {
 
 ### GPS Coordinate Conversion
 
-**Location**: `gps_to_decimal_point()` at `src/main.rs:722`
+**Location**: `gps_to_point()` at `src/gps.rs:55`
 
 EXIF GPS data is stored as degrees/minutes/seconds (DMS). Conversion handles:
 - DMS to decimal degrees conversion
@@ -549,15 +570,18 @@ EXIF GPS data is stored as degrees/minutes/seconds (DMS). Conversion handles:
 
 ### Place Matching Logic
 
-**Location**: `src/main.rs:238-261`
+**Location**: `find_matching_place()` at `src/gps.rs:131`
 
 ```rust
-for place in places {
-    let distance = calculate_distance(&gps, &(place.lat, place.lon)) / 1000.0;
-    if distance < place.radius {
-        // Route to this place's target
-        break;  // First match wins (implicit via into_place flag)
+pub fn find_matching_place<'a>(gps: &GPSInfo, places: &'a [Place]) -> Option<PlaceMatch<'a>> {
+    for place in places {
+        let pos: (f64, f64) = (place.lat, place.lon);
+        let distance = calculate_distance(gps, &pos) / 1000.0; // Convert to km
+        if distance < place.radius {
+            return Some(PlaceMatch { place, distance_km: distance });
+        }
     }
+    None
 }
 ```
 
@@ -618,7 +642,7 @@ Files that fail to process (no date extracted, I/O error) are:
 
 ### 9.1 Test Organization
 
-All tests are located in `src/path.rs` within a `#[cfg(test)]` module:
+Tests are located in module-specific `#[cfg(test)]` blocks:
 
 ```
 src/path.rs
@@ -633,13 +657,25 @@ src/path.rs
     ├── test_deep_nesting
     ├── test_different_drives_windows  (#[cfg(windows)])
     └── test_same_drive_windows        (#[cfg(windows)])
+
+src/gps.rs
+└── mod tests
+    ├── test_gps_coordinates_new
+    ├── test_distance_km_same_point
+    └── test_distance_km_different_points
 ```
 
 ### 9.2 Running Specific Tests
 
 ```bash
+# Run all tests
+cargo test
+
 # Run all path module tests
 cargo test path::tests
+
+# Run all GPS module tests
+cargo test gps::tests
 
 # Run a specific test
 cargo test test_common_parent_directory
@@ -657,11 +693,11 @@ Currently tested:
 - Path utility functions (`find_common_base`)
 - Various path relationship scenarios
 - Cross-platform path handling (Windows conditional tests)
+- GPS coordinate creation and distance calculations
 
 **Not currently tested** (potential areas for expansion):
 - Date extraction from filenames
 - EXIF parsing (would require test fixtures)
-- GPS distance calculations
 - Config file parsing
 - File collision handling
 
@@ -694,7 +730,7 @@ mod date_tests {
 
 ### How File Watching Works
 
-**Location**: `src/main.rs:469-543`
+**Location**: `src/main.rs:354-435`
 
 1. For each configured directory, spawns a dedicated thread
 2. Each thread creates a `notify::recommended_watcher`
@@ -813,19 +849,18 @@ Logs go to systemd journal. Access via `journalctl --user -u sort_pictures`.
 
 **Files to modify**: `src/main.rs`
 
-1. **Add regex constant** (around line 113-116):
+1. **Add regex constant** (around line 49-53):
 ```rust
 let new_pattern_regex = Regex::new(r"your_pattern_here")?;
 ```
 
-2. **Add extraction logic** (in `process_fname()`, after line 228):
+2. **Add extraction logic** (in `process_fname()`, after the existing date pattern checks):
 ```rust
-if date_found.is_none() {
-    if let Some(captures) = new_pattern_regex.captures(&filename) {
-        // Extract year, month, day from captures
-        // Call validation function
-        // Set date_found = Some(date_str)
-    }
+if date_found.is_none()
+    && let Some(captures) = new_pattern_regex.captures(&filename) {
+    // Extract year, month, day from captures
+    // Call validation function
+    // Set date_found = Some(date_str)
 }
 ```
 
@@ -835,24 +870,45 @@ if date_found.is_none() {
 
 ### 11.2 Adding a New Configuration Option
 
-**Files to modify**: `src/main.rs`
+**Files to modify**: `src/config.rs`
 
 1. **Add field to struct** (`Dir`, `Place`, or `Config`):
 ```rust
-struct Dir {
+pub struct Dir {
     // existing fields...
     #[serde(default)]
-    new_option: bool,
+    pub new_option: bool,
 }
 ```
 
-2. **Update processing logic** to use the new option.
+2. **Update processing logic** in `src/main.rs` to use the new option.
 
 3. **Update example config** in `systemd/config.toml`.
 
 4. **Update this CLAUDE.md** in the Configuration section.
 
-### 11.3 Debugging File Processing Issues
+### 11.3 Adding GPS Matching Logic
+
+**Files to modify**: `src/gps.rs`
+
+1. **Add new GPS-related function** in `src/gps.rs`:
+```rust
+/// Your new GPS utility function
+pub fn new_gps_function(/* params */) -> ReturnType {
+    // Implementation
+}
+```
+
+2. **Export from module** - ensure the function is `pub` if needed by other modules.
+
+3. **Import in main.rs** if used there:
+```rust
+use gps::new_gps_function;
+```
+
+4. **Add test cases** in `src/gps.rs` under `#[cfg(test)] mod tests`.
+
+### 11.4 Debugging File Processing Issues
 
 **To trace why a specific file was handled a certain way:**
 
@@ -946,14 +1002,12 @@ No strict version constraints beyond what's in `Cargo.toml`. All dependencies us
 
 ### Comment Language
 
-**Mixed Russian and English**. Russian comments explain the business logic and regex patterns:
+**English**. Comments use English throughout the codebase:
 
 ```rust
-// Создаем регулярные выражения для различных форматов дат
-// (Creating regex for various date formats)
+// Create regex patterns for various date formats
 
-// Пропускаем директории и скрытые файлы
-// (Skip directories and hidden files)
+// Skip directories and hidden files
 ```
 
 ### Error Messages
