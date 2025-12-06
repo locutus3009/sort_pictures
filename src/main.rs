@@ -347,6 +347,7 @@ fn process_fname(
             let target = target_path.clone();
             let (base, rel_source, rel_target) = path::find_common_base(&source, &target);
 
+            std::thread::sleep(std::time::Duration::from_millis(1000));
             print!(
                 "Move: \"{}\"/{{\"{}\" -> \"{}\"}}... ",
                 base.to_string_lossy(),
@@ -568,17 +569,25 @@ fn parse_exif<T: std::io::Read + std::io::Seek>(
     let date_tags = [
         ExifTag::DateTimeOriginal, // Дата и время создания оригинального изображения
         ExifTag::CreateDate,       // Стандартная дата/время
+        ExifTag::ModifyDate,       // Дата последней модификации
     ];
 
     let mut result_date = None;
     for &tag in &date_tags {
         if let Some(field) = exif.get(tag) {
-            let time = field.as_time()?;
-            result_date = Some((
-                format!("{:04}-{:02}-{:02}", time.year(), time.month(), time.day()),
-                exif.get_gps_info().unwrap(),
-            ));
-            break;
+            let time_opt = match field {
+                nom_exif::EntryValue::Time(dt) => Some((dt.year(), dt.month(), dt.day())),
+                nom_exif::EntryValue::NaiveDateTime(dt) => Some((dt.year(), dt.month(), dt.day())),
+                _ => field.as_time().map(|dt| (dt.year(), dt.month(), dt.day())),
+            };
+
+            if let Some((year, month, day)) = time_opt {
+                result_date = Some((
+                    format!("{:04}-{:02}-{:02}", year, month, day),
+                    exif.get_gps_info().ok().flatten(),
+                ));
+                break;
+            }
         }
     }
 

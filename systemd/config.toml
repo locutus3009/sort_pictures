@@ -20,8 +20,8 @@ target = "/hdd/locutus/Pictures/Хроника"
 [[dirs]]
 source = "/hdd/locutus/Pictures/Хроника"
 
-[[dirs]]
-source = "/hdd/locutus/Pictures/Спорт/Похудение"
+#[[dirs]]
+#source = "/hdd/locutus/Pictures/Спорт/Похудение"
 
 [[dirs]]
 source = "/hdd/locutus/Pictures/Фотографии Иры"
@@ -29,15 +29,21 @@ source = "/hdd/locutus/Pictures/Фотографии Иры"
 [[dirs]]
 source = "/hdd/locutus/Pictures/Спорт/Боулдеринг"
 
-[[dirs]]
-source = "/home/locutus/dev/sort_pictures/tmp"
-target = "/home/locutus/dev/sort_pictures/tmp/sorted"
-# nodecade = true
-# noyear = true
-# nomonth = true
+#[[dirs]]
+#source = "/home/locutus/dev/sort_pictures/tmp"
+#target = "/home/locutus/dev/sort_pictures/tmp/sorted"
+## nodecade = true
+## noyear = true
+## nomonth = true
 
 #[[dirs]]
 #source = "/hdd/locutus/Pictures/Походы/ПВД/2015-06-06 Кросс-поход Вестры"
+#nodecade = true
+#noyear = true
+#nomonth = true
+
+#[[dirs]]
+#source = "/hdd/locutus/Pictures/Учеба/Все подряд"
 #nodecade = true
 #noyear = true
 #nomonth = true
