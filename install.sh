@@ -20,9 +20,9 @@ fi
 
 # Копирование файлов
 echo "Копирование файлов..."
-cp target/release/sort_pictures ~/apps/bin/
-cp systemd/sort_pictures.service ~/.config/systemd/user/sort_pictures.service
-cp systemd/config.toml ~/.config/sort_pictures/config.toml
+cp $(pwd)/target/release/sort_pictures ~/apps/bin/
+cp $(pwd)/systemd/sort_pictures.service ~/.config/systemd/user/sort_pictures.service
+cp $(pwd)/systemd/config.toml ~/.config/sort_pictures/config.toml
 
 # Установка прав на выполнение
 echo "Установка прав..."
